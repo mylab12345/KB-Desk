@@ -7,7 +7,13 @@
 //!
 //! The server never sees plaintext input semantics after pairing: it only
 //! forwards the framed stream. Authentication and streaming are end-to-end
-//! between host and viewer.
+//! between host and viewer, and since protocol v2 that stream is also
+//! end-to-end *encrypted* (`kbdesk_core::crypto`): the pump forwards
+//! ciphertext. Both legs (host->relay, viewer->relay) additionally run
+//! over TLS, which is mandatory unless `--allow-plaintext` is passed for
+//! local development. The only plaintext the relay itself processes is the
+//! first routing frame of each connection (host id / pair request), always
+//! inside the TLS leg.
 //!
 //! Parked (registered but unpaired) hosts are reaped when their connection
 //! dies, so a viewer is never paired with a corpse connection and left
@@ -17,22 +23,24 @@
 
 use anyhow::{bail, Context, Result};
 use clap::Parser;
+use kbdesk_core::tls::{self, MaybeTlsStream, TlsServerOptions};
 use kbdesk_core::{
     generate_id, normalize_id, read_packet, write_packet, Control, Role, DEFAULT_PORT,
     KIND_CONTROL,
 };
 use std::collections::HashMap;
 use std::net::SocketAddr;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::io::{AsyncWrite, AsyncWriteExt};
-use tokio::net::{TcpListener, TcpStream};
+use tokio::net::TcpListener;
 use tokio::sync::Mutex;
 use tracing::{info, warn, Level};
 use tracing_subscriber::EnvFilter;
 
-/// id -> the host's live TCP connection (parked until a viewer arrives).
-type Registry = Arc<Mutex<HashMap<String, TcpStream>>>;
+/// id -> the host's live connection (parked until a viewer arrives).
+type Registry = Arc<Mutex<HashMap<String, MaybeTlsStream>>>;
 
 /// How often parked registrations are checked for liveness.
 const REAP_INTERVAL: Duration = Duration::from_secs(10);
@@ -53,6 +61,19 @@ struct Args {
     /// TCP port to listen on.
     #[arg(long, default_value_t = DEFAULT_PORT)]
     port: u16,
+
+    /// PEM certificate chain to present to hosts/viewers (TLS is mandatory
+    /// unless --allow-plaintext). Env: KB_DESK_TLS_CERT.
+    #[arg(long, env = "KB_DESK_TLS_CERT")]
+    tls_cert: Option<PathBuf>,
+
+    /// PEM private key for --tls-cert. Env: KB_DESK_TLS_KEY.
+    #[arg(long, env = "KB_DESK_TLS_KEY")]
+    tls_key: Option<PathBuf>,
+
+    /// Serve plaintext TCP instead of TLS. Local development ONLY.
+    #[arg(long)]
+    allow_plaintext: bool,
 }
 
 async fn send_control<W: AsyncWrite + Unpin>(writer: &mut W, control: &Control) -> Result<()> {
@@ -68,11 +89,19 @@ async fn main() -> Result<()> {
         .init();
 
     let args = Args::parse();
+    let acceptor = tls::tls_acceptor(&TlsServerOptions {
+        cert_file: args.tls_cert.clone(),
+        key_file: args.tls_key.clone(),
+        allow_plaintext: args.allow_plaintext,
+    })?;
+    if args.allow_plaintext {
+        warn!("--allow-plaintext: relay legs are UNENCRYPTED at transport level (session content is still E2E-encrypted). Do not use beyond local development.");
+    }
     let addr = format!("{}:{}", args.bind, args.port);
     let listener = TcpListener::bind(&addr)
         .await
         .with_context(|| format!("binding {addr}"))?;
-    info!(%addr, "kbdesk-server listening; hosts register, viewers connect by id");
+    info!(%addr, tls = acceptor.is_some(), "kbdesk-server listening; hosts register, viewers connect by id");
 
     let registry: Registry = Arc::new(Mutex::new(HashMap::new()));
 
@@ -92,7 +121,17 @@ async fn main() -> Result<()> {
         };
         let _ = stream.set_nodelay(true);
         let registry = registry.clone();
+        let acceptor = acceptor.clone();
         tokio::spawn(async move {
+            let stream = match tls::accept(stream, acceptor.as_ref()).await {
+                Ok(stream) => stream,
+                Err(e) => {
+                    if tracing::enabled!(Level::DEBUG) {
+                        warn!(%peer, "TLS accept failed: {e:#}");
+                    }
+                    return;
+                }
+            };
             if let Err(e) = handle_conn(stream, registry, peer).await {
                 if tracing::enabled!(Level::DEBUG) {
                     warn!(%peer, "connection ended: {e:#}");
@@ -203,7 +242,7 @@ async fn handle_conn(mut stream: TcpStream, registry: Registry, peer: SocketAddr
 }
 
 async fn serve_viewer(
-    mut viewer: TcpStream,
+    mut viewer: MaybeTlsStream,
     registry: Registry,
     target: String,
     peer: SocketAddr,

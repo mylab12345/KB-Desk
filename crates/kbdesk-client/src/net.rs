@@ -2,16 +2,46 @@
 //!
 //! A Tokio runtime runs on a background thread. The GUI talks to it by sending
 //! [`ClientCmd`] values and by reading live state out of [`Shared`].
+//!
+//! Connections are TLS-encrypted, and the viewer<->host session is
+//! additionally end-to-end encrypted (protocol v2): the password never
+//! leaves this process — it is verified through the key exchange in
+//! `kbdesk_core::crypto`. TLS behaviour is configured via environment
+//! (same names as everywhere else): `KB_DESK_TLS_CA`,
+//! `KB_DESK_TLS_SERVER_NAME`, plus the development-only escapes
+//! `KB_DESK_TLS_INSECURE=1` / `KB_DESK_ALLOW_PLAINTEXT=1`.
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result};
+use kbdesk_core::crypto;
+use kbdesk_core::tls::{self, TlsClientOptions};
 use kbdesk_core::{
-    decode_video, read_packet, write_packet, Control, InputEvent, Packet, Role, KIND_CONTROL,
-    KIND_VIDEO, PROTOCOL_VERSION,
+    decode_video, read_secure_packet, write_packet, write_secure_packet, Control, InputEvent,
+    Packet, KIND_CONTROL, KIND_VIDEO,
 };
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use tokio::io::AsyncWriteExt;
-use tokio::net::TcpStream;
 use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
+
+fn env_flag(name: &str) -> bool {
+    matches!(std::env::var(name).as_deref(), Ok("1") | Ok("true") | Ok("TRUE") | Ok("yes"))
+}
+
+fn tls_options_from_env() -> TlsClientOptions {
+    let opts = TlsClientOptions {
+        ca_file: std::env::var_os("KB_DESK_TLS_CA").map(PathBuf::from),
+        server_name: std::env::var("KB_DESK_TLS_SERVER_NAME").ok().filter(|s| !s.is_empty()),
+        insecure: env_flag("KB_DESK_TLS_INSECURE"),
+        allow_plaintext: env_flag("KB_DESK_ALLOW_PLAINTEXT"),
+    };
+    if opts.allow_plaintext {
+        tracing::warn!("KB_DESK_ALLOW_PLAINTEXT=1: transport TLS disabled (session still E2E-encrypted). Local development only.");
+    }
+    if opts.insecure {
+        tracing::warn!("KB_DESK_TLS_INSECURE=1: server certificates will not be verified. Local development only.");
+    }
+    opts
+}
 
 /// A frame ready to be decoded by the GUI.
 #[derive(Clone)]
@@ -216,7 +246,7 @@ async fn session(
             command = rx.recv() => {
                 match command {
                     Some(ClientCmd::Input(event)) => {
-                        write_packet(&mut writer, KIND_CONTROL, &Control::Input(event).encode()).await?;
+                        write_secure_packet(&mut writer, &mut tx_cipher, KIND_CONTROL, &Control::Input(event).encode()).await?;
                     }
                     Some(ClientCmd::Disconnect) | None => {
                         let _ = writer.shutdown().await;

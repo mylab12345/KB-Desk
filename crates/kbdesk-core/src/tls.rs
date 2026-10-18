@@ -28,7 +28,9 @@ use std::task::{Context as TaskContext, Poll};
 use std::time::Duration;
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::net::TcpStream;
-use tokio_rustls::{TlsAcceptor, TlsConnector};
+use tokio_rustls::TlsConnector;
+
+pub use tokio_rustls::TlsAcceptor;
 
 /// Guidance shown when a component is started without the certificates TLS
 /// requires and did not explicitly opt into plaintext.
