@@ -185,10 +185,17 @@ async def main():
     check(sess.state != "live" and sess.error is not None and "authentication failed" in sess.error,
           f"wrong password detected by viewer-side key confirmation (got: {sess.error})")
     await ws.close()
+    # That consumed the host registration; give it a moment to re-register.
+    await asyncio.sleep(1.5)
 
     # ---- phase C: full session (ID typed with spaces, as humans see it) ----
     ws, sess = await dial("testpw")
-    ok_live = await sess.pump_until(lambda s: s.state == "live")
+    ok_live = await sess.pump_until(lambda s: s.state == "live", timeout=8)
+    if not ok_live and sess.error and "no host" in sess.error:
+        await ws.close()
+        await asyncio.sleep(2)
+        ws, sess = await dial("testpw")
+        ok_live = await sess.pump_until(lambda s: s.state == "live")
     check(ok_live and sess.host_id == HOST_ID,
           f"encrypted session established with host (state={sess.state}, id={sess.host_id}, err={sess.error})")
 

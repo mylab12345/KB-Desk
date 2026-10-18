@@ -60,6 +60,7 @@ jobs:
       # wire carries ONLY TLS ciphertext (no password/text/JPEG/plaintext).
       - name: E2E smoke test (browser via relay, TLS + E2E encrypted)
         run: |
+          exec > >(tee -a ci.log) 2>&1
           set -x
           ./target/release/kbdesk --help | grep -q serve
           test -x ./target/release/kbdesk-server && test -x ./target/release/kbdesk-web
@@ -133,7 +134,23 @@ jobs:
         name: C toolchain for ring (zig cc)
         run: |
           pip install --quiet ziglang
-          printf '#!/bin/sh\nexec python3 -m ziglang cc -target x86_64-macos-gnu "$@"\n' > /tmp/zigcc-darwin
+          # cc-rs adds its own --target=x86_64-apple-macosx (and Apple-clang
+          # flags like -arch/-gfull) that zig rejects; filter them out.
+          cat > /tmp/zigcc-darwin <<'EOF'
+          #!/bin/bash
+          args=()
+          skip_next=0
+          for a in "$@"; do
+            if [ "$skip_next" = 1 ]; then skip_next=0; continue; fi
+            case "$a" in
+              --target=*) ;;
+              -arch) skip_next=1 ;;
+              -gfull) args+=("-g") ;;
+              *) args+=("$a") ;;
+            esac
+          done
+          exec python3 -m ziglang cc -target x86_64-macos-gnu "${args[@]}"
+          EOF
           printf '#!/bin/sh\nexec python3 -m ziglang ar "$@"\n' > /tmp/zigar-darwin
           chmod +x /tmp/zigcc-darwin /tmp/zigar-darwin
           echo "CC_x86_64_apple_darwin=/tmp/zigcc-darwin" >> "$GITHUB_ENV"
