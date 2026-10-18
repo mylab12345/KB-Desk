@@ -128,6 +128,12 @@ cargo build --release
 
 Binaries land in `target/release/`.
 
+CI (GitHub Actions, `.github/workflows/ci.yml`) checks the workspace, runs the
+unit tests, builds release binaries, cross-checks Windows/macOS, and runs an
+end-to-end smoke test of the browser path (`tests/e2e/`): a WebSocket client
+drives `kbdesk-web` → relay → a fake host and asserts frames, input, and
+session teardown all arrive intact.
+
 ### Rebuilding after code changes
 
 Use `update.sh` instead of calling `cargo` by hand:

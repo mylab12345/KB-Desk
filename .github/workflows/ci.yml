@@ -5,10 +5,6 @@ on:
   pull_request:
   workflow_dispatch:
 
-permissions:
-  contents: read
-  issues: write
-
 jobs:
   build:
     name: build + test (ubuntu)
@@ -25,30 +21,28 @@ jobs:
           libxcb1-dev libxcb-render0-dev libxcb-shape0-dev
           libxcb-xfixes0-dev libxkbcommon-dev
 
-      # NOTE: `set -o pipefail` is essential — without it a failing cargo
-      # command piped into tee would report success.
       - name: Check whole workspace compiles
-        run: set -o pipefail; cargo check --workspace --locked 2>&1 | tee -a ci.log
+        run: cargo check --workspace --locked
 
       - name: Test (protocol, relay, web bridge, host, launcher)
         run: >-
-          set -o pipefail; cargo test --locked
+          cargo test --locked
           -p kbdesk-core -p kbdesk-server -p kbdesk-web
-          -p kbdesk-host -p kbdesk-launcher 2>&1 | tee -a ci.log
+          -p kbdesk-host -p kbdesk-launcher
 
       - name: Release build of the browser-control stack
         run: >-
-          set -o pipefail; cargo build --release --locked
+          cargo build --release --locked
           -p kbdesk-launcher -p kbdesk-server -p kbdesk-web -p kbdesk-host -p kbdesk-client
-          2>&1 | tee -a ci.log
 
       # End-to-end smoke test of the exact "control from a browser" path:
       # browser_client.py (WebSocket, like web/index.html) -> kbdesk-web ->
       # kbdesk-server relay -> fake_host.py (speaks the wire protocol).
+      # Asserts: spaced ID works, auth, JPEG frames, mouse/key/text input,
+      # stream retune, ping/pong latency probe, clean session end.
       - name: E2E smoke test (browser via relay)
         run: |
           set -x
-          exec > >(tee -a ci.log) 2>&1
           ./target/release/kbdesk --help | grep -q serve
           test -x ./target/release/kbdesk-server && test -x ./target/release/kbdesk-web
           pip install --quiet websockets
@@ -64,18 +58,6 @@ jobs:
           grep -q 'ReleaseAll' /tmp/fake_host_log.jsonl
           grep -q '"quality": 50' /tmp/fake_host_log.jsonl
           echo E2E-OK
-        shell: bash
-
-      # TEMPORARY (removed once green): this repo is being developed from a
-      # sandbox that cannot reach the Actions log host, so failures post
-      # their own log as an issue where the API can read it.
-      - name: Post failure log as an issue
-        if: failure()
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          { echo "CI failure log tail for ${GITHUB_SHA}:"; echo '```'; tail -n 300 ci.log 2>/dev/null; echo '```'; } > /tmp/body.md
-          gh issue create --title "ci-log ${GITHUB_SHA::8}" --body-file /tmp/body.md || true
 
       - name: Upload binaries
         uses: actions/upload-artifact@v4
@@ -110,14 +92,6 @@ jobs:
       # claims check-level support, and the headless crates are the ones whose
       # cross-platform code (capture/input backends) actually matters here.
       - run: >-
-          set -o pipefail; cargo check --locked --target ${{ matrix.target }}
+          cargo check --locked --target ${{ matrix.target }}
           -p kbdesk-core -p kbdesk-server -p kbdesk-web
-          -p kbdesk-host -p kbdesk-launcher 2>&1 | tee -a ci.log
-      # TEMPORARY: see note in the build job.
-      - name: Post failure log as an issue
-        if: failure()
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          { echo "Cross-check failure (${{ matrix.target }}) for ${GITHUB_SHA}:"; echo '```'; tail -n 300 ci.log 2>/dev/null; echo '```'; } > /tmp/body.md
-          gh issue create --title "ci-log ${GITHUB_SHA::8} ${{ matrix.target }}" --body-file /tmp/body.md || true
+          -p kbdesk-host -p kbdesk-launcher
