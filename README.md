@@ -47,8 +47,8 @@ but a browser:
 # On the server (stays running):
 ./run.sh serve            # = kbdesk serve: relay :21118 + browser viewer :8080
 
-# On each machine to be controlled:
-kbdesk-host --server <server-ip>:21118 --password <its-password>
+# On each machine to be controlled (after cargo build --release there):
+target/release/kbdesk-host --server <server-ip>:21118 --password <its-password>
 # → prints:  KB-Desk ID: 544228382      (stays registered, reconnects itself)
 
 # On the controlling side: open http://<server-ip>:8080/ in any browser,
@@ -180,8 +180,18 @@ Common options: `--password <p>`, `--id <id>`, `--bind 0.0.0.0`,
 
 ### 1. Relay server (needed only for relay mode)
 
+> ⚠️ The `kbdesk-*` binaries are **not** installed system-wide by a plain
+> `cargo build` — typing `kbdesk-server` right after cloning gives
+> `command not found`. Build first and run them from `target/release/`
+> (as below), use the `kbdesk` launcher / `./run.sh` (which builds for you),
+> or install them onto your PATH once:
+> `cargo install --path crates/kbdesk-server --locked` (same pattern for the
+> other crates). The `.deb` package (see *Packaging*) also puts them in
+> `/usr/bin`, after which the bare names work.
+
 ```bash
-kbdesk-server --bind 0.0.0.0 --port 21118
+cargo build --release   # once (also done for you by ./run.sh)
+target/release/kbdesk-server --bind 0.0.0.0 --port 21118
 ```
 
 ### 2. Host (the machine being controlled)
@@ -189,14 +199,14 @@ kbdesk-server --bind 0.0.0.0 --port 21118
 Relay mode — register and print a numeric ID:
 
 ```bash
-KB_DESK_PASSWORD=mysecret kbdesk-host --server 203.0.113.5:21118
+KB_DESK_PASSWORD=mysecret target/release/kbdesk-host --server 203.0.113.5:21118
 # → KB-Desk ID: 544228382
 ```
 
 Direct mode — listen for viewers on a port:
 
 ```bash
-KB_DESK_PASSWORD=mysecret kbdesk-host --listen --bind 0.0.0.0 --port 21118
+KB_DESK_PASSWORD=mysecret target/release/kbdesk-host --listen --bind 0.0.0.0 --port 21118
 ```
 
 Useful flags: `--id <id>`, `--fps 15`, `--quality 70`, `--monitor 0`.
@@ -206,7 +216,7 @@ Useful flags: `--id <id>`, `--fps 15`, `--quality 70`, `--monitor 0`.
 Launch the GUI and fill in the address, optional ID, and password:
 
 ```bash
-kbdesk-client
+target/release/kbdesk-client
 ```
 
 Fields can be pre-filled from the environment:
@@ -222,7 +232,7 @@ Serve a browser-based viewer. This is what lets *anyone* connect with just a
 browser:
 
 ```bash
-kbdesk-web --listen 0.0.0.0:8080 --relay relay.example.com:21118
+target/release/kbdesk-web --listen 0.0.0.0:8080 --relay relay.example.com:21118
 ```
 
 Then open `http://<server>:8080/` in any browser, enter the **ID** and
