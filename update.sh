@@ -96,7 +96,7 @@ do_build() {
         local elapsed=$(( $(date +%s) - start ))
         echo "${C_GRN}==> build OK in ${elapsed}s${C_RST}"
         echo "    binaries in ${OUT_DIR}/:"
-        for b in kbdesk-server kbdesk-host kbdesk-client kbdesk-web; do
+        for b in kbdesk kbdesk-server kbdesk-host kbdesk-client kbdesk-web; do
             if [ -x "$OUT_DIR/$b" ]; then
                 printf '      %s%-18s%s %s\n' "$C_DIM" "$b" "$C_RST" \
                     "$(du -h "$OUT_DIR/$b" 2>/dev/null | cut -f1)"

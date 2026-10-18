@@ -1,8 +1,13 @@
 //! Screen capture.
 //!
-//! Linux/X11 is the reference backend. Other operating systems get a stub so
-//! the workspace still builds everywhere; adding Windows/macOS capture is a
-//! matter of implementing [`Capture::capture_jpeg`] for that platform.
+//! Two backends, selected at compile time:
+//!
+//! * **Linux / X11** — pure-Rust protocol client via `x11rb` (no C build deps).
+//!   Works on X11 desktops and on Wayland sessions that expose XWayland.
+//! * **Windows and macOS** — the `xcap` crate, which wraps GDI / CoreGraphics.
+//!
+//! Any other target falls back to a stub that reports a clear error instead of
+//! failing to compile.
 
 #[cfg(target_os = "linux")]
 pub use linux::Capture;
@@ -91,11 +96,84 @@ mod linux {
     }
 }
 
+#[cfg(any(target_os = "windows", target_os = "macos"))]
+pub use desktop::Capture;
+
+/// Windows / macOS capture backend built on `xcap`.
+#[cfg(any(target_os = "windows", target_os = "macos"))]
+mod desktop {
+    use anyhow::{bail, Context, Result};
+    use image::{codecs::jpeg::JpegEncoder, ExtendedColorType};
+    use xcap::Monitor;
+
+    /// One monitor, captured through the OS compositor.
+    pub struct Capture {
+        monitor: Monitor,
+        width: u16,
+        height: u16,
+    }
+
+    impl Capture {
+        /// Pick the primary monitor, or the first one if none is marked primary.
+        pub fn new() -> Result<Self> {
+            let mut monitors =
+                Monitor::all().context("enumerating monitors (check screen-recording permission)")?;
+            if monitors.is_empty() {
+                bail!("no monitors reported by the operating system");
+            }
+            let idx = monitors
+                .iter()
+                .position(|m| m.is_primary().unwrap_or(false))
+                .unwrap_or(0);
+            let monitor = monitors.swap_remove(idx);
+
+            let width = clamp_dim(monitor.width().context("reading monitor width")?);
+            let height = clamp_dim(monitor.height().context("reading monitor height")?);
+            if width == 0 || height == 0 {
+                bail!("monitor reports a {width}x{height} size");
+            }
+            Ok(Self {
+                monitor,
+                width,
+                height,
+            })
+        }
+
+        /// Screen size in pixels.
+        pub fn dimensions(&self) -> (u16, u16) {
+            (self.width, self.height)
+        }
+
+        /// Grab the whole screen and encode it as JPEG.
+        pub fn capture_jpeg(&self, quality: u8) -> Result<(u16, u16, Vec<u8>)> {
+            let image = self.monitor.capture_image().context(
+                "capturing the screen (on macOS grant Screen Recording to this app; \
+                 on Wayland use an X11/XWayland session)",
+            )?;
+            let (w, h) = (image.width(), image.height());
+            if w == 0 || h == 0 {
+                bail!("captured a zero-sized frame");
+            }
+            let mut jpeg = Vec::new();
+            let mut encoder = JpegEncoder::new_with_quality(&mut jpeg, quality.clamp(1, 100));
+            encoder
+                .encode(image.as_raw(), w, h, ExtendedColorType::Rgba8)
+                .context("encoding JPEG")?;
+            Ok((clamp_dim(w), clamp_dim(h), jpeg))
+        }
+    }
+
+    /// The wire protocol stores dimensions as `u16`.
+    fn clamp_dim(v: u32) -> u16 {
+        v.min(u16::MAX as u32) as u16
+    }
+}
+
 /// Placeholder backend for platforms without an implementation yet.
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(any(target_os = "linux", target_os = "windows", target_os = "macos")))]
 pub use other::Capture;
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(any(target_os = "linux", target_os = "windows", target_os = "macos")))]
 mod other {
     use anyhow::{bail, Result};
 
@@ -104,7 +182,7 @@ mod other {
     impl Capture {
         pub fn new() -> Result<Self> {
             bail!(
-                "KB-Desk capture is implemented for Linux/X11 first; \
+                "KB-Desk capture is implemented for Linux/X11, Windows and macOS; \
                  add a backend for this platform in crates/kbdesk-host/src/capture.rs"
             )
         }

@@ -11,6 +11,29 @@ over the network. Built from scratch in Rust.
 
 ---
 
+## Quick start (Windows · macOS · Linux)
+
+Clone the repo, then run **one command**. It builds on first use, then starts a
+relay, the host (sharing this machine) and the browser viewer:
+
+```bash
+# Linux / macOS
+./run.sh                 # relay + host + web viewer  (viewers need only an ID)
+./run.sh web             # host + web viewer, no relay
+./run.sh host            # just share this screen
+
+# Windows (PowerShell)
+.\run.ps1                # same modes as above
+.\run.cmd web            # double-clickable wrapper for PowerShell
+```
+
+Then, from another machine, open the printed `http://<this-machine>:8080/` in any
+browser and enter the **ID** and **password** from the banner.
+
+`run.sh` / `run.ps1` only build the project and forward to the `kbdesk` launcher,
+so the same command works on every OS. A Rust toolchain is required
+(<https://rustup.rs>).
+
 ## What it does
 
 - **Screen sharing** — the host captures its display and streams it as JPEG.
@@ -41,6 +64,7 @@ over the network. Built from scratch in Rust.
 | `crates/kbdesk-host`   | `kbdesk-host`   | Screen capture + input injection |
 | `crates/kbdesk-client` | `kbdesk-client` | Native viewer GUI (egui/eframe) |
 | `crates/kbdesk-web`    | `kbdesk-web`    | Browser viewer (HTTP + WebSocket) |
+| `crates/kbdesk-launcher` | `kbdesk`      | One-command launcher for the above |
 
 The **web viewer** replaces the native client: it serves a page that speaks the
 same protocol over a WebSocket, so a viewer only needs a browser — nothing to
@@ -78,10 +102,27 @@ running in a terminal while you edit. It survives build failures (fix and save
 again) and stops with Ctrl-C.
 
 On Linux the host uses the pure-Rust X11 client (`x11rb`) for capture, so no C
-libraries are needed to build. `enigo` provides input injection on X11, Wayland,
+libraries are needed to build. On Windows and macOS the host captures through
+`xcap` (GDI / CoreGraphics). `enigo` provides input injection on X11, Wayland,
 Windows, and macOS.
 
 ## Run it
+
+The fastest path is the `kbdesk` launcher (see **Quick start**). The sections
+below describe the underlying pieces and their flags, which the launcher simply
+wires together.
+
+```bash
+target/release/kbdesk up     # relay + host + web viewer on this machine
+target/release/kbdesk web    # host + web viewer, no relay
+target/release/kbdesk host   # share this screen (direct)
+target/release/kbdesk relay  # relay server only
+target/release/kbdesk viewer # native desktop viewer
+```
+
+Common options: `--password <p>`, `--id <id>`, `--bind 0.0.0.0`,
+`--web-port 8080`, `--relay-port 21118`, `--host-port 21119`, `--fps 15`,
+`--quality 70`.
 
 ### 1. Relay server (needed only for relay mode)
 
@@ -208,14 +249,26 @@ pairs it with the host and then forwards bytes untouched.
 
 | Platform | Capture | Input | Status |
 |----------|---------|-------|--------|
-| Linux / X11     | ✅ `x11rb` (pure Rust) | ✅ `enigo` | **Reference backend** |
-| Linux / Wayland | via XWayland only | ✅ `enigo` | Capture on native Wayland not yet wired up |
-| Windows | stub (builds) | ✅ `enigo` | Capture backend to be added |
-| macOS   | stub (builds) | ✅ `enigo` | Capture backend to be added |
+| Linux / X11     | ✅ `x11rb` (pure Rust) | ✅ `enigo` | Fully implemented |
+| Linux / Wayland | via XWayland only | ✅ `enigo` | Native Wayland capture not wired up |
+| Windows         | ✅ `xcap` (GDI) | ✅ `enigo` | Implemented; builds cross-checked |
+| macOS           | ✅ `xcap` (CoreGraphics) | ✅ `enigo` | Implemented; builds cross-checked |
 
-The workspace builds on all three platforms; only Linux/X11 capture is fully
-implemented. Adding a capture backend is a matter of implementing
-`Capture::capture_jpeg` in `crates/kbdesk-host/src/capture.rs`.
+The whole workspace compiles for all three platforms (`cargo check` passes for
+`x86_64-pc-windows-gnu` and `x86_64-apple-darwin`). Linux/X11 is the
+continuously exercised backend; the Windows and macOS backends are implemented
+but have not been run on those operating systems yet.
+
+### Permissions
+
+- **macOS** — the first run must be granted **Screen Recording** (to capture)
+  and **Accessibility** (to send input) in *System Settings → Privacy &
+  Security*. Without Screen Recording you will see a black screen; without
+  Accessibility, clicks and keys are ignored.
+- **Windows** — capture and input work without special permission, but an
+  unelevated host cannot control windows that are running elevated (UAC).
+- **Linux / Wayland** — run under an X11 session, or ensure XWayland is present;
+  native Wayland capture is not yet implemented.
 
 ## ⚠️ Security
 

@@ -1,0 +1,16 @@
+[package]
+name = "kbdesk-launcher"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "KB-Desk one-command launcher (cross-platform)"
+
+[[bin]]
+name = "kbdesk"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+clap.workspace = true
+getrandom = "0.2"
+ctrlc = "3"

@@ -6,6 +6,7 @@ members = [
     "crates/kbdesk-host",
     "crates/kbdesk-client",
     "crates/kbdesk-web",
+    "crates/kbdesk-launcher",
 ]
 
 [workspace.package]

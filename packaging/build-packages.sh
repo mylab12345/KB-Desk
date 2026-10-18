@@ -34,7 +34,7 @@ fi
 
 DIST="$ROOT/dist"
 BUILD="$ROOT/packaging/.build"
-BINS=(kbdesk-server kbdesk-host kbdesk-client kbdesk-web)
+BINS=(kbdesk kbdesk-server kbdesk-host kbdesk-client kbdesk-web)
 OUT="$ROOT/target/release"
 
 echo "KB-Desk packaging"
@@ -121,6 +121,7 @@ Description: KB-Desk remote desktop (agent, relay, viewer, web viewer)
   * kbdesk-server - the relay / rendezvous server
   * kbdesk-client - the native viewer (GUI)
   * kbdesk-web    - a browser-based viewer served over HTTP/WebSocket
+  * kbdesk        - one-command launcher for the above
 EOF
 
     cat > "$stage/DEBIAN/conffiles" <<EOF
@@ -224,7 +225,7 @@ sudo install -d "$PREFIX/bin" \
     "$PREFIX/share/icons/hicolor/scalable/apps" \
     "/etc/kbdesk"
 
-for b in kbdesk-server kbdesk-host kbdesk-client kbdesk-web; do
+for b in kbdesk kbdesk-server kbdesk-host kbdesk-client kbdesk-web; do
     sudo install -m 0755 "$HERE/usr/bin/$b" "$PREFIX/bin/$b"
 done
 sudo install -m 0644 "$HERE/usr/share/applications/kbdesk-client.desktop" \
