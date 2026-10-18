@@ -81,6 +81,12 @@ The browser viewer is a complete controller, not a view-only page:
 - latency stays flat on slow links: frames and mouse-moves are
   latest-wins at every hop instead of queueing up.
 
+> 🌍 **Controlling machines over the internet, by ID + password?**
+> See **[docs/internet-deployment.md](docs/internet-deployment.md)** — the
+> complete guide: putting `kbdesk serve` on a VPS (or a VPN, or a home PC),
+> fixed "userid" IDs, per-machine passwords, HTTPS, auto-start, and the
+> security checklist to read before exposing anything publicly.
+
 ## What it does
 
 - **Screen sharing** — the host captures its display and streams it as JPEG.
