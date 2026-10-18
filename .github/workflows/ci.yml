@@ -113,11 +113,18 @@ jobs:
 
   cross-check:
     name: cargo check (${{ matrix.target }})
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
-        target: [x86_64-pc-windows-gnu, x86_64-apple-darwin]
+        include:
+          - target: x86_64-pc-windows-gnu
+            os: ubuntu-latest
+          # ring (rustls' crypto) compiles C/asm and needs a real Apple SDK,
+          # so the macOS check runs natively on a macOS runner instead of
+          # cross-compiling from Linux.
+          - target: aarch64-apple-darwin
+            os: macos-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -128,34 +135,6 @@ jobs:
           key: ${{ matrix.target }}
       - if: matrix.target == 'x86_64-pc-windows-gnu'
         run: sudo apt-get update && sudo apt-get install -y gcc-mingw-w64-x86-64
-      # ring (rustls' crypto provider) compiles C + asm, so the darwin
-      # cross-check needs a C compiler that can target macOS from Linux:
-      # zig cc provides one without an Apple SDK (check-only; no linking).
-      - if: matrix.target == 'x86_64-apple-darwin'
-        name: C toolchain for ring (zig cc)
-        run: |
-          pip install --quiet ziglang
-          # cc-rs adds its own --target=x86_64-apple-macosx (and Apple-clang
-          # flags like -arch/-gfull) that zig rejects; filter them out.
-          cat > /tmp/zigcc-darwin <<'EOF'
-          #!/bin/bash
-          args=()
-          skip_next=0
-          for a in "$@"; do
-            if [ "$skip_next" = 1 ]; then skip_next=0; continue; fi
-            case "$a" in
-              --target=*) ;;
-              -arch) skip_next=1 ;;
-              -gfull) args+=("-g") ;;
-              *) args+=("$a") ;;
-            esac
-          done
-          exec python3 -m ziglang cc -target x86_64-macos-gnu "${args[@]}"
-          EOF
-          printf '#!/bin/sh\nexec python3 -m ziglang ar "$@"\n' > /tmp/zigar-darwin
-          chmod +x /tmp/zigcc-darwin /tmp/zigar-darwin
-          echo "CC_x86_64_apple_darwin=/tmp/zigcc-darwin" >> "$GITHUB_ENV"
-          echo "AR_x86_64_apple_darwin=/tmp/zigar-darwin" >> "$GITHUB_ENV"
       # egui/eframe cross-compilation needs target GUI SDKs; the README only
       # claims check-level support, and the headless crates are the ones whose
       # cross-platform code (capture/input backends) actually matters here.

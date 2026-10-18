@@ -374,7 +374,7 @@ untouched — i.e., ciphertext.
 | macOS           | ✅ `xcap` (CoreGraphics) | ✅ `enigo` | Implemented; builds cross-checked |
 
 The whole workspace compiles for all three platforms (`cargo check` passes for
-`x86_64-pc-windows-gnu` and `x86_64-apple-darwin`). Linux/X11 is the
+`x86_64-pc-windows-gnu` and, on a native macOS runner, `aarch64-apple-darwin`). Linux/X11 is the
 continuously exercised backend; the Windows and macOS backends are implemented
 but have not been run on those operating systems yet.
 
