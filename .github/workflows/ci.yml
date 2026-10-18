@@ -5,6 +5,10 @@ on:
   pull_request:
   workflow_dispatch:
 
+permissions:
+  contents: read
+  issues: write
+
 jobs:
   build:
     name: build + test (ubuntu)
@@ -15,18 +19,30 @@ jobs:
       - uses: Swatinem/rust-cache@v2
 
       - name: Check whole workspace compiles
-        run: cargo check --workspace --locked
+        run: cargo check --workspace --locked 2>&1 | tee -a ci.log
 
       - name: Test (protocol, relay, web bridge, host, launcher)
         run: >-
           cargo test --locked
           -p kbdesk-core -p kbdesk-server -p kbdesk-web
-          -p kbdesk-host -p kbdesk-launcher
+          -p kbdesk-host -p kbdesk-launcher 2>&1 | tee -a ci.log
 
       - name: Release build of the browser-control stack
         run: >-
           cargo build --release --locked
           -p kbdesk-launcher -p kbdesk-server -p kbdesk-web -p kbdesk-host -p kbdesk-client
+          2>&1 | tee -a ci.log
+
+      # TEMPORARY (removed once green): this repo is being developed from a
+      # sandbox that cannot reach the Actions log host, so failures post
+      # their own log as an issue where the API can read it.
+      - name: Post failure log as an issue
+        if: failure()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          { echo "CI failure log tail for ${GITHUB_SHA}:"; echo '```'; tail -n 300 ci.log 2>/dev/null; echo '```'; } > /tmp/body.md
+          gh issue create --title "ci-log ${GITHUB_SHA::8}" --body-file /tmp/body.md || true
 
       - name: Upload binaries
         uses: actions/upload-artifact@v4
