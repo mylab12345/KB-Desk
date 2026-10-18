@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="utf-8" />
-<meta name="viewport" content="width=device-width, initial-scale=1" />
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
 <title>KB-Desk — Web Viewer</title>
 <style>
   :root { --bg:#0e1116; --panel:#171c24; --line:#28303c; --fg:#e7edf3; --mut:#8b98a8; --acc:#4f9cf9; --ok:#3ecf8e; --err:#ff6b6b; }
@@ -15,223 +15,615 @@
   h1 span { color:var(--mut); font-weight:400; }
   .row { display:flex; flex-wrap:wrap; gap:8px; align-items:center; }
   label { color:var(--mut); font-size:12px; }
-  input { background:#0b0e13; border:1px solid var(--line); color:var(--fg);
-          border-radius:7px; padding:6px 9px; font-size:13px; outline:none; }
-  input:focus { border-color:var(--acc); }
+  input, select, textarea { background:#0b0e13; border:1px solid var(--line); color:var(--fg);
+          border-radius:7px; padding:6px 9px; font-size:13px; outline:none; font-family:inherit; }
+  input:focus, select:focus, textarea:focus { border-color:var(--acc); }
+  input[type=range] { padding:0; accent-color:var(--acc); }
   button { background:var(--acc); color:#04121f; border:0; border-radius:7px;
            padding:7px 14px; font-weight:600; cursor:pointer; font-size:13px; }
-  button.ghost { background:transparent; color:var(--fg); border:1px solid var(--line); }
+  button.ghost { background:transparent; color:var(--fg); border:1px solid var(--line); font-weight:500; }
   button:disabled { opacity:.45; cursor:default; }
+  button.active { background:var(--acc); color:#04121f; }
   #status { margin-top:8px; font-size:12.5px; color:var(--mut); min-height:18px; }
   #status.ok { color:var(--ok); } #status.err { color:var(--err); }
-  #stage { position:relative; flex:1; display:flex; align-items:center; justify-content:center; overflow:hidden; background:#05070a; }
-  canvas { max-width:100%; max-height:100%; display:block; background:#000; cursor:default; outline:none; }
+  #stage { position:relative; flex:1; display:flex; overflow:hidden; background:#05070a;
+           user-select:none; -webkit-user-select:none; -webkit-touch-callout:none; }
+  canvas { display:block; background:#000; cursor:default; outline:none; margin:auto; flex:none; touch-action:none; }
   canvas:focus { box-shadow:0 0 0 2px var(--acc) inset; }
-  #hint { position:absolute; color:var(--mut); text-align:center; padding:0 24px; pointer-events:none; max-width:560px; }
+  #stage[data-scale="fit"] canvas { max-width:100%; max-height:100%; }
+  #stage[data-scale="actual"] { overflow:auto; }
+  #stage[data-scale="actual"] canvas { max-width:none; max-height:none; }
+  #stage[data-scale="stretch"] canvas { width:100%; height:100%; }
+  #hint { position:absolute; color:var(--mut); text-align:center; padding:0 24px; pointer-events:none;
+          max-width:620px; left:50%; top:45%; transform:translate(-50%,-50%); }
   /* when connected: hide the form, show live controls */
-  body.live #form { display:none; }
+  body.live #formRow { display:none; }
   body.live #title { display:none; }
-  #live { display:none; }
-  body.live #live { display:flex; }
-  #live .dot { width:9px; height:9px; border-radius:50%; background:var(--ok); display:inline-block; margin-right:6px; }
+  #livebar, #pastebar, #keybar { display:none; margin-top:6px; }
+  body.live #livebar { display:flex; }
+  body.live.paste-open #pastebar { display:flex; }
+  body.live.keybar-open #keybar { display:flex; }
+  #livebar .dot { width:9px; height:9px; border-radius:50%; background:var(--ok); display:inline-block; margin-right:6px; flex:none; }
   .live-status { color:var(--ok); font-size:12.5px; margin-right:auto; display:flex; align-items:center; }
+  .stats { color:var(--mut); font-size:12px; font-variant-numeric:tabular-nums; white-space:nowrap; }
+  .chk { display:flex; align-items:center; gap:4px; font-size:12px; color:var(--mut); cursor:pointer; }
+  .chk input { accent-color:var(--acc); }
+  #mobileInput { position:absolute; opacity:0; pointer-events:none; width:1px; height:1px; left:0; bottom:0; }
 </style>
 </head>
 <body>
 <div id="app">
   <header>
-    <h1 id="title">KB-Desk <span>· web viewer</span></h1>
+    <h1 id="title">KB-Desk <span>· web viewer — control a machine from this browser</span></h1>
 
-    <div class="row" id="form">
+    <form class="row" id="formRow" autocomplete="off">
       <label for="id">ID</label>
-      <input id="id" size="12" placeholder="123 456 789" />
+      <input id="id" size="12" inputmode="numeric" placeholder="544 228 382" />
       <label for="pw">Password</label>
       <input id="pw" type="password" size="16" />
+      <button type="button" id="showPw" class="ghost" title="Show/hide password">👁</button>
       <span id="addrWrap" style="display:none">
-        <label for="addr">Host address</label>
+        <label for="addr">Host / relay address</label>
         <input id="addr" size="20" placeholder="host:21118" />
       </span>
-      <button id="connect">Connect</button>
-    </div>
+      <label for="quality">Quality</label>
+      <input id="quality" type="range" min="10" max="95" step="5" value="70" style="width:90px" />
+      <span id="qualityVal" class="stats">70</span>
+      <label for="fps">FPS</label>
+      <select id="fps">
+        <option>5</option><option>10</option><option selected>15</option>
+        <option>24</option><option>30</option><option>60</option>
+      </select>
+      <label for="monitor">Monitor</label>
+      <input id="monitor" type="number" min="0" max="15" value="0" style="width:52px" />
+      <label class="chk"><input type="checkbox" id="reconnect" checked /> auto-reconnect</label>
+      <button type="submit" id="connect">Connect</button>
+    </form>
 
-    <div class="row" id="live">
+    <div class="row" id="livebar">
       <span class="live-status"><span class="dot"></span><span id="liveText">Connected</span></span>
-      <button id="fullscreen" class="ghost">Fullscreen</button>
-      <button id="disconnect" class="ghost">Disconnect</button>
+      <span class="stats" id="stats"></span>
+      <label for="liveQuality">Q</label>
+      <input id="liveQuality" type="range" min="10" max="95" step="5" value="70" style="width:80px" />
+      <label for="liveFps">FPS</label>
+      <select id="liveFps">
+        <option>5</option><option>10</option><option selected>15</option>
+        <option>24</option><option>30</option><option>60</option>
+      </select>
+      <label for="scale">View</label>
+      <select id="scale">
+        <option value="fit" selected>Fit</option>
+        <option value="actual">Actual size</option>
+        <option value="stretch">Stretch</option>
+      </select>
+      <select id="combo" title="Send a key combination the browser would otherwise swallow.">
+        <option value="">Send keys…</option>
+        <option value="ctrlaltdel">Ctrl+Alt+Del</option>
+        <option value="ctrlshiftesc">Ctrl+Shift+Esc (Task Manager)</option>
+        <option value="altf4">Alt+F4</option>
+        <option value="alttab">Alt+Tab</option>
+        <option value="ctrlesc">Ctrl+Esc (Start menu)</option>
+        <option value="wind">Win+D (desktop)</option>
+        <option value="wine">Win+E (explorer)</option>
+        <option value="winr">Win+R (run)</option>
+        <option value="winl">Win+L (lock)</option>
+        <option value="printscreen">Print Screen</option>
+        <option value="escape">Esc</option>
+      </select>
+      <button type="button" id="pasteBtn" class="ghost" title="Type text into the remote machine.">Paste text</button>
+      <button type="button" id="keybarBtn" class="ghost" title="Extra keys for touch screens.">⌨ Keys</button>
+      <label class="chk"><input type="checkbox" id="viewOnly" /> view-only</label>
+      <button type="button" id="fullscreen" class="ghost">Fullscreen</button>
+      <button type="button" id="disconnect" class="ghost">Disconnect</button>
     </div>
 
-    <div id="status">Not connected. Enter the ID and password, then press Connect.</div>
+    <div class="row" id="pastebar">
+      <textarea id="pasteText" rows="2" style="flex:1;min-width:220px" maxlength="4000"
+        placeholder="Text to type into the remote machine (it is typed, not clipboard-synced)"></textarea>
+      <button type="button" id="pasteSend">Type it</button>
+      <button type="button" id="pasteClip" class="ghost">Use my clipboard</button>
+      <button type="button" id="pasteClose" class="ghost">Close</button>
+    </div>
+
+    <div class="row" id="keybar"><!-- buttons built in JS --></div>
+
+    <div id="status">Not connected. Enter the ID and password shown on the other machine, then press Connect.</div>
   </header>
-  <div id="stage">
+
+  <div id="stage" data-scale="fit">
     <canvas id="screen" width="1280" height="720" tabindex="0"></canvas>
+    <input id="mobileInput" autocomplete="off" autocapitalize="off" spellcheck="false" />
     <div id="hint">Enter an ID and password, then press Connect.<br />
-      <span style="font-size:12px">Click the screen once to send keyboard input to the remote machine.</span></div>
+      <span style="font-size:12px">Once connected, click the screen to control it — mouse, touch and keyboard
+      are sent to the remote machine. Use <b>Fullscreen</b> so keys like Esc / F-keys reach the remote
+      instead of your browser (a few, e.g. Ctrl+W, are always reserved by the browser itself).</span></div>
   </div>
 </div>
 
 <script>
 (() => {
+  "use strict";
   const $ = (id) => document.getElementById(id);
-  const canvas = $("screen");
-  const ctx = canvas.getContext("2d");
-  const statusEl = $("status");
-  const hint = $("hint");
-  const liveText = $("liveText");
+  const canvas = $("screen"), ctx = canvas.getContext("2d");
+  const statusEl = $("status"), hint = $("hint"), liveText = $("liveText");
+  const stage = $("stage"), mobileInput = $("mobileInput");
+  // Works behind a reverse-proxy sub-path as well as at the root.
+  const base = location.pathname.endsWith("/") ? location.pathname.slice(0, -1) : location.pathname;
 
-  let ws = null;
-  let connected = false;
-  let frameW = 1, frameH = 1;
+  let ws = null, wsOpen = false;
+  let live = false;             // host accepted us and is streaming
+  let wantConnected = false;    // user intent (drives auto-reconnect)
+  let lastParams = null, reconnectTimer = 0, retryCount = 0;
   let relayConfigured = false;
+  let frameW = 1, frameH = 1;
+  let statsTimer = 0, pingTimer = 0, drawnInWindow = 0, droppedTotal = 0, latencyMs = null;
 
   const setStatus = (msg, cls = "") => { statusEl.textContent = msg; statusEl.className = cls; };
-  const send = (obj) => { if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(obj)); };
+  const send = (obj) => { if (ws && wsOpen) ws.send(JSON.stringify(obj)); };
+  const viewOnly = () => $("viewOnly").checked;
+  const sendInput = (event) => { if (live && !viewOnly()) send({ type: "input", event }); };
+  const sendKey = (key, down) => sendInput({ Key: { key, down } });
 
-  fetch("/config").then(r => r.json()).then(cfg => {
+  // ---------------- config / form restore ----------------
+  fetch(base + "/config").then(r => r.json()).then(cfg => {
     relayConfigured = !!cfg.relay;
-    if (!relayConfigured) $("addrWrap").style.display = "inline";
+    if (!relayConfigured) {
+      $("addrWrap").style.display = "inline";
+      setStatus("Direct mode: enter the host address (or a relay address + ID) and the password.");
+    }
   }).catch(() => { $("addrWrap").style.display = "inline"; });
 
-  function connect() {
-    const password = $("pw").value;
-    const id = $("id").value.trim();
-    const address = $("addr").value.trim();
-    if (!password) { setStatus("Enter the password.", "err"); return; }
-    if (!relayConfigured && !address) { setStatus("Enter the host address.", "err"); return; }
+  const params = new URLSearchParams(location.search);
+  $("id").value = params.get("id") || localStorage.getItem("kbdesk.id") || "";
+  $("addr").value = params.get("addr") || localStorage.getItem("kbdesk.addr") || "";
+  if (localStorage.getItem("kbdesk.quality")) $("quality").value = localStorage.getItem("kbdesk.quality");
+  if (localStorage.getItem("kbdesk.fps")) $("fps").value = localStorage.getItem("kbdesk.fps");
+  $("liveQuality").value = $("quality").value; $("liveFps").value = $("fps").value;
+  $("qualityVal").textContent = $("quality").value;
+  $("quality").addEventListener("input", () => { $("qualityVal").textContent = $("quality").value; });
+  $("showPw").addEventListener("click", () => {
+    $("pw").type = $("pw").type === "password" ? "text" : "password"; $("pw").focus();
+  });
 
+  // ---------------- connection lifecycle ----------------
+  function openWs(onOpen) {
     const proto = location.protocol === "https:" ? "wss://" : "ws://";
-    ws = new WebSocket(proto + location.host + "/ws");
+    ws = new WebSocket(proto + location.host + base + "/ws");
     ws.binaryType = "arraybuffer";
-    ws.onopen = () => {
-      connected = true;
-      hint.style.display = "none";
-      document.body.classList.add("live");
-      setStatus("Connecting…");
-      send({ type: "connect", id: id || null, address: address || null, password });
-      canvas.focus();
-    };
+    ws.onopen = () => { wsOpen = true; onOpen && onOpen(); };
     ws.onmessage = (ev) => {
       if (typeof ev.data === "string") {
-        const m = JSON.parse(ev.data);
-        if (m.type === "status") { setStatus(m.message, "ok"); liveText.textContent = m.message; }
-        else if (m.type === "error") setStatus(m.message, "err");
+        let m; try { m = JSON.parse(ev.data); } catch { return; }
+        if (m.type === "status") {
+          setStatus(m.message, "ok"); liveText.textContent = m.message;
+          if (m.message.indexOf("connected") === 0) enterLive();
+        } else if (m.type === "pong") {
+          latencyMs = Math.max(0, Date.now() - m.t);
+        } else if (m.type === "error") {
+          setStatus(m.message, "err");
+          const wasLive = live; exitLive();
+          if (wantConnected && $("reconnect").checked && shouldRetry(m.message, wasLive)) scheduleReconnect();
+        } else if (m.type === "ended") {
+          const wasLive = live; exitLive();
+          setStatus("Session ended.");
+          if (wantConnected && $("reconnect").checked && wasLive) scheduleReconnect();
+        }
       } else {
-        drawFrame(new Uint8Array(ev.data));
+        onFrame(new Uint8Array(ev.data));
       }
     };
-    ws.onclose = () => resetView("Disconnected.");
-    ws.onerror = () => setStatus("WebSocket connection error.", "err");
+    ws.onclose = () => {
+      wsOpen = false; const wasLive = live; exitLive();
+      if (wantConnected && $("reconnect").checked) scheduleReconnect();
+      else if (!wantConnected) setStatus("Disconnected.");
+      else if (!wasLive) setStatus("Connection closed.", "err");
+    };
+    ws.onerror = () => setStatus("WebSocket error — is the KB-Desk web server reachable?", "err");
   }
 
-  function disconnect() { if (ws) ws.close(); }
+  function shouldRetry(message, wasLive) {
+    if (/authentication|enter the ID|enter a direct|bad message/.test(message)) return false;
+    return wasLive || /no host|timed out|refused|connecting to|lost/.test(message);
+  }
 
-  function resetView(msg) {
-    connected = false; ws = null;
-    document.body.classList.remove("live");
+  function scheduleReconnect() {
+    if (reconnectTimer || retryCount >= 8) {
+      if (retryCount >= 8) setStatus("Could not reconnect (gave up after 8 tries). Press Connect to try again.", "err");
+      return;
+    }
+    retryCount += 1;
+    const delay = Math.min(1000 * retryCount, 5000);
+    setStatus("Connection lost — reconnecting in " + (delay / 1000) + "s (try " + retryCount + "/8)…");
+    reconnectTimer = setTimeout(() => {
+      reconnectTimer = 0;
+      if (!wantConnected || !lastParams) return;
+      if (ws && wsOpen) send(lastParams); else openWs(() => send(lastParams));
+    }, delay);
+  }
+
+  function connect() {
+    const id = $("id").value.replace(/[\s-]/g, "");
+    const address = $("addr").value.trim();
+    const password = $("pw").value;
+    if (relayConfigured && !id) { setStatus("Enter the ID shown on the machine you want to control.", "err"); return; }
+    if (!relayConfigured && !address) { setStatus("Enter the host address.", "err"); return; }
+    if (!password) { setStatus("Enter the password.", "err"); return; }
+
+    localStorage.setItem("kbdesk.id", id);
+    localStorage.setItem("kbdesk.addr", address);
+    localStorage.setItem("kbdesk.quality", $("quality").value);
+    localStorage.setItem("kbdesk.fps", $("fps").value);
+
+    wantConnected = true; retryCount = 0;
+    lastParams = {
+      type: "connect", id: id || null, address: address || null, password,
+      monitor: parseInt($("monitor").value, 10) || 0,
+      quality: parseInt($("quality").value, 10) || 70,
+      fps: parseInt($("fps").value, 10) || 15,
+    };
+    setStatus("Connecting…");
+    if (ws && wsOpen) send(lastParams); else openWs(() => send(lastParams));
+  }
+
+  function disconnect() {
+    wantConnected = false; retryCount = 0;
+    if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = 0; }
+    releaseAll();
+    send({ type: "disconnect" });
+    if (ws) ws.close();
+    exitLive(); setStatus("Disconnected.");
+  }
+
+  function enterLive() {
+    if (live) return;
+    live = true; retryCount = 0;
+    document.body.classList.add("live");
+    hint.style.display = "none";
+    liveText.textContent = "Connected" + (lastParams && lastParams.id ? " · ID " + lastParams.id : "");
+    canvas.focus();
+    clearInterval(statsTimer); clearInterval(pingTimer);
+    statsTimer = setInterval(() => {
+      $("stats").textContent =
+        frameW + "×" + frameH + " · " + drawnInWindow + " fps" +
+        (latencyMs === null ? "" : " · " + latencyMs + " ms") +
+        (droppedTotal ? " · " + droppedTotal + " dropped" : "");
+      drawnInWindow = 0;
+    }, 1000);
+    const ping = () => send({ type: "ping", t: Date.now() });
+    ping(); pingTimer = setInterval(ping, 2500);
+  }
+
+  function exitLive() {
+    if (live) releaseAll();
+    live = false; latencyMs = null;
+    document.body.classList.remove("live", "paste-open", "keybar-open");
     hint.style.display = "block";
-    setStatus(msg);
+    clearInterval(statsTimer); clearInterval(pingTimer);
   }
 
-  async function drawFrame(bytes) {
-    if (bytes.length < 5) return;
-    const dv = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
-    const w = dv.getUint16(0), h = dv.getUint16(2);
-    frameW = w; frameH = h;
-    if (canvas.width !== w || canvas.height !== h) { canvas.width = w; canvas.height = h; }
-    const blob = new Blob([bytes.subarray(5)], { type: "image/jpeg" });
+  // ---------------- video: latest frame wins ----------------
+  let pendingFrame = null, decoding = false;
+  function onFrame(bytes) {
+    if (pendingFrame) droppedTotal += 1;  // stale before it was even decoded
+    pendingFrame = bytes;
+    pump();
+  }
+  async function pump() {
+    if (decoding || !pendingFrame) return;
+    decoding = true;
+    const bytes = pendingFrame; pendingFrame = null;
     try {
-      const bitmap = await createImageBitmap(blob);
-      ctx.drawImage(bitmap, 0, 0);
-      if (bitmap.close) bitmap.close();
+      if (bytes.length >= 5) {
+        const dv = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+        const w = dv.getUint16(0), h = dv.getUint16(2);
+        if (w && h) {
+          frameW = w; frameH = h;
+          if (canvas.width !== w || canvas.height !== h) { canvas.width = w; canvas.height = h; }
+          const bitmap = await createImageBitmap(new Blob([bytes.subarray(5)], { type: "image/jpeg" }));
+          ctx.drawImage(bitmap, 0, 0);
+          if (bitmap.close) bitmap.close();
+          drawnInWindow += 1;
+        }
+      }
     } catch (e) { /* skip a corrupt frame */ }
+    decoding = false;
+    pump();
   }
 
-  // ---- mouse ----
-  function toRemote(ev) {
+  // ---------------- pointer (mouse + pen + touch) ----------------
+  function toRemote(clientX, clientY) {
     const r = canvas.getBoundingClientRect();
-    const x = Math.round((ev.clientX - r.left) / r.width * frameW);
-    const y = Math.round((ev.clientY - r.top) / r.height * frameH);
+    const x = Math.round((clientX - r.left) / r.width * frameW);
+    const y = Math.round((clientY - r.top) / r.height * frameH);
     return { x: Math.max(0, Math.min(frameW - 1, x)), y: Math.max(0, Math.min(frameH - 1, y)) };
   }
-  const BUTTON = { 0: "Left", 1: "Middle", 2: "Right" };
+  const BUTTON = { 0: "Left", 1: "Middle", 2: "Right", 3: "Back", 4: "Forward" };
+  const mouseDown = new Set();
 
-  canvas.addEventListener("mousedown", (e) => {
+  // Coalesce moves: at most one MouseMove per animation frame.
+  let pendingMove = null, rafPending = false;
+  function queueMove(pos) {
+    pendingMove = pos;
+    if (!rafPending) {
+      rafPending = true;
+      requestAnimationFrame(() => { rafPending = false; flushMove(); });
+    }
+  }
+  function flushMove() {
+    if (pendingMove) { sendInput({ MouseMove: pendingMove }); pendingMove = null; }
+  }
+  function clickAt(pos, button) {
+    sendInput({ MouseMove: pos });
+    sendInput({ MouseButton: { button, down: true } });
+    sendInput({ MouseButton: { button, down: false } });
+  }
+
+  const touches = new Map(); // pointerId -> {x,y,t,moved,longPress,consumed}
+  let lastTwoFingerY = null, scrollAccX = 0, scrollAccY = 0;
+
+  canvas.addEventListener("pointerdown", (e) => {
     canvas.focus();
-    if (!connected) return;
+    if (!live || viewOnly()) return;
     e.preventDefault();
-    const { x, y } = toRemote(e);
-    send({ type: "input", event: { MouseMove: { x, y } } });
-    send({ type: "input", event: { MouseButton: { button: BUTTON[e.button] || "Left", down: true } } });
+    try { canvas.setPointerCapture(e.pointerId); } catch (err) {}
+    const pos = toRemote(e.clientX, e.clientY);
+    if (e.pointerType === "touch") {
+      const rec = { x: e.clientX, y: e.clientY, t: performance.now(), moved: false, consumed: false, longPress: 0 };
+      rec.longPress = setTimeout(() => {
+        if (!rec.moved && !rec.consumed && touches.size === 1) { rec.consumed = true; clickAt(pos, "Right"); }
+      }, 550);
+      touches.set(e.pointerId, rec);
+      if (touches.size === 2) { lastTwoFingerY = avgTouchY(); }
+    } else {
+      pendingMove = pos; flushMove();
+      const b = BUTTON[e.button]; if (!b) return;
+      mouseDown.add(b);
+      sendInput({ MouseButton: { button: b, down: true } });
+    }
   });
-  canvas.addEventListener("mousemove", (e) => {
-    if (!connected) return;
-    const { x, y } = toRemote(e);
-    send({ type: "input", event: { MouseMove: { x, y } } });
+
+  canvas.addEventListener("pointermove", (e) => {
+    if (!live || viewOnly()) return;
+    if (e.pointerType === "touch") {
+      const rec = touches.get(e.pointerId); if (!rec) return;
+      if (Math.hypot(e.clientX - rec.x, e.clientY - rec.y) > 12 && touches.size === 1) rec.moved = true;
+      rec.x = e.clientX; rec.y = e.clientY;
+      if (touches.size === 2) {
+        const y = avgTouchY();
+        if (lastTwoFingerY !== null) accumulateScroll(0, lastTwoFingerY - y);
+        lastTwoFingerY = y;
+      } else if (rec.moved || e.isPrimary) {
+        queueMove(toRemote(e.clientX, e.clientY));
+      }
+    } else {
+      queueMove(toRemote(e.clientX, e.clientY));
+    }
   });
-  window.addEventListener("mouseup", (e) => {
-    if (!connected) return;
-    if (BUTTON[e.button]) send({ type: "input", event: { MouseButton: { button: BUTTON[e.button], down: false } } });
-  });
+
+  function pointerEnd(e, cancelled) {
+    if (e.pointerType === "touch") {
+      const rec = touches.get(e.pointerId);
+      touches.delete(e.pointerId);
+      if (touches.size < 2) lastTwoFingerY = null;
+      if (!rec) return;
+      clearTimeout(rec.longPress);
+      if (!cancelled && !rec.consumed && !rec.moved && performance.now() - rec.t < 350) {
+        clickAt(toRemote(e.clientX, e.clientY), "Left"); // tap = click
+      }
+    } else {
+      const b = BUTTON[e.button];
+      if (b && mouseDown.has(b)) {
+        mouseDown.delete(b);
+        if (live && !viewOnly()) sendInput({ MouseButton: { button: b, down: false } });
+      }
+    }
+  }
+  canvas.addEventListener("pointerup", (e) => pointerEnd(e, false));
+  canvas.addEventListener("pointercancel", (e) => { pointerEnd(e, true); releaseAll(); });
   canvas.addEventListener("contextmenu", (e) => e.preventDefault());
+  function avgTouchY() {
+    let s = 0; touches.forEach((r) => { s += r.y; }); return touches.size ? s / touches.size : 0;
+  }
+
+  function accumulateScroll(dxPx, dyPx) {
+    scrollAccX += dxPx; scrollAccY += dyPx;
+    const nx = Math.trunc(scrollAccX / 50), ny = Math.trunc(scrollAccY / 50);
+    if (nx || ny) {
+      scrollAccX -= nx * 50; scrollAccY -= ny * 50;
+      sendInput({ MouseScroll: { dx: nx, dy: ny } });
+    }
+  }
   canvas.addEventListener("wheel", (e) => {
-    if (!connected) return;
+    if (!live || viewOnly()) return;
     e.preventDefault();
-    send({ type: "input", event: { MouseScroll: { dx: Math.round(e.deltaX / 10), dy: Math.round(e.deltaY / 10) } } });
+    pendingMove = toRemote(e.clientX, e.clientY); flushMove(); // scroll under cursor
+    const f = e.deltaMode === 1 ? 33 : e.deltaMode === 2 ? canvas.clientHeight : 1;
+    accumulateScroll(e.deltaX * f, e.deltaY * f);
   }, { passive: false });
 
-  // ---- keyboard ----
-  // Named (non-printing) keys. Printable characters go through Event-less mapping
-  // using e.key, which already includes the effect of Shift and the layout.
-  const NAMED = {
-    Enter: "Enter", Tab: "Tab", Escape: "Escape", Backspace: "Backspace", Delete: "Delete",
+  // ---------------- keyboard ----------------
+  // Map by physical code first (layout-independent position, L/R modifiers).
+  const CODE_NAMED = {
+    Enter: "Enter", NumpadEnter: "NumpadEnter", Tab: "Tab", Escape: "Escape",
+    Backspace: "Backspace", Space: "Space", Delete: "Delete", Insert: "Insert",
     Home: "Home", End: "End", PageUp: "PageUp", PageDown: "PageDown",
     ArrowUp: "ArrowUp", ArrowDown: "ArrowDown", ArrowLeft: "ArrowLeft", ArrowRight: "ArrowRight",
-    CapsLock: "CapsLock",
-    F1: "F1", F2: "F2", F3: "F3", F4: "F4", F5: "F5", F6: "F6", F7: "F7", F8: "F8",
-    F9: "F9", F10: "F10", F11: "F11", F12: "F12",
+    ShiftLeft: "ShiftLeft", ShiftRight: "ShiftRight",
+    ControlLeft: "ControlLeft", ControlRight: "ControlRight",
+    AltLeft: "AltLeft", AltRight: "AltRight", MetaLeft: "MetaLeft", MetaRight: "MetaRight",
+    CapsLock: "CapsLock", NumLock: "NumLock", ScrollLock: "ScrollLock",
+    PrintScreen: "PrintScreen", Pause: "Pause", ContextMenu: "ContextMenu",
+    Numpad0: "Numpad0", Numpad1: "Numpad1", Numpad2: "Numpad2", Numpad3: "Numpad3", Numpad4: "Numpad4",
+    Numpad5: "Numpad5", Numpad6: "Numpad6", Numpad7: "Numpad7", Numpad8: "Numpad8", Numpad9: "Numpad9",
+    NumpadAdd: "NumpadAdd", NumpadSubtract: "NumpadSubtract", NumpadMultiply: "NumpadMultiply",
+    NumpadDivide: "NumpadDivide", NumpadDecimal: "NumpadDecimal",
   };
-  // Modifiers we hold down for the duration of the press (so Ctrl+C etc. work).
-  const HELD = { Control: "ControlLeft", Alt: "Alt", Meta: "Meta" };
+  for (let i = 1; i <= 24; i++) CODE_NAMED["F" + i] = "F" + i;
+  const pressed = new Set();
 
-  const sendKey = (key, down) => send({ type: "input", event: { Key: { key, down } } });
-
-  window.addEventListener("keydown", (e) => {
-    if (!connected) return;
-    if (e.key === "Shift") { e.preventDefault(); return; } // handled contextually below
-    if (HELD[e.key]) {
+  function fromFormField(e) {
+    const t = e.target;
+    return t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.tagName === "SELECT") && t !== mobileInput;
+  }
+  function onKey(e, down) {
+    if (!live || viewOnly() || fromFormField(e)) return;
+    if (e.target === mobileInput && down && e.key && e.key.length === 1 && !e.ctrlKey && !e.metaKey) return; // soft kbd → 'input' below
+    const named = CODE_NAMED[e.code] || (e.key && e.key.length > 1 ? CODE_NAMED[e.key] : null);
+    if (named) {
       e.preventDefault();
-      if (!e.repeat) sendKey({ Named: HELD[e.key] }, true);
+      if (down) {
+        if (pressed.has(named)) return; // host OS auto-repeats while held
+        pressed.add(named); sendKey({ Named: named }, true);
+      } else {
+        pressed.delete(named); sendKey({ Named: named }, false);
+      }
       return;
     }
-    if (e.key.length === 1) {                // printable: e.key already has Shift applied
+    if (down && e.key && e.key.length === 1) {
       e.preventDefault();
-      sendKey({ Char: e.key }, true);
-      sendKey({ Char: e.key }, false);
-      return;
+      // e.key already has Shift/layout applied; with Ctrl/Meta held, send the
+      // base letter so Ctrl+C etc. work regardless of layout/caps.
+      const ch = (e.ctrlKey || e.metaKey) ? e.key.toLowerCase() : e.key;
+      sendKey({ Char: ch }, true); sendKey({ Char: ch }, false);
     }
-    if (NAMED[e.key]) {
-      e.preventDefault();
-      if (e.repeat) return;
-      // Wrap named keys with Shift so selections (Shift+Arrow, Shift+Tab) work.
-      if (e.shiftKey) sendKey({ Named: "ShiftLeft" }, true);
-      sendKey({ Named: NAMED[e.key] }, true);
-      if (e.shiftKey) sendKey({ Named: "ShiftLeft" }, false);
-    }
+  }
+  window.addEventListener("keydown", (e) => onKey(e, true));
+  window.addEventListener("keyup", (e) => onKey(e, false));
+
+  // Mobile soft keyboard: hidden input whose content diffs become text.
+  const SENTINEL = "•";
+  mobileInput.value = SENTINEL;
+  mobileInput.addEventListener("input", (e) => {
+    if (!live || viewOnly()) { mobileInput.value = SENTINEL; return; }
+    const v = mobileInput.value;
+    if (e.inputType === "insertLineBreak") { sendKey({ Named: "Enter" }, true); sendKey({ Named: "Enter" }, false); }
+    else if (v.length === 0) { sendKey({ Named: "Backspace" }, true); sendKey({ Named: "Backspace" }, false); }
+    else if (v.length > 1) sendInput({ Text: v.slice(1) });
+    mobileInput.value = SENTINEL;
   });
 
-  window.addEventListener("keyup", (e) => {
-    if (!connected) return;
-    if (e.key === "Shift") { e.preventDefault(); return; }
-    if (HELD[e.key]) { e.preventDefault(); sendKey({ Named: HELD[e.key] }, false); return; }
-    if (e.key.length === 1) return;          // already released
-    if (NAMED[e.key]) sendKey({ Named: NAMED[e.key] }, false);
+  // Never leave keys/buttons stuck on the remote machine.
+  function releaseAll() {
+    pressed.clear(); mouseDown.clear(); pendingMove = null;
+    touches.forEach((r) => clearTimeout(r.longPress)); touches.clear(); lastTwoFingerY = null;
+    document.querySelectorAll("#keybar button.active").forEach((b) => b.classList.remove("active"));
+    if (ws && wsOpen) send({ type: "input", event: "ReleaseAll" });
+  }
+  window.addEventListener("blur", () => { if (live) releaseAll(); });
+  document.addEventListener("visibilitychange", () => { if (live && document.hidden) releaseAll(); });
+
+  // ---------------- key combinations + extra keys ----------------
+  function combo(keys) {
+    if (!live || viewOnly()) return;
+    const events = [];
+    keys.forEach((k) => events.push({ Key: { key: { Named: k }, down: true } }));
+    keys.slice().reverse().forEach((k) => events.push({ Key: { key: { Named: k }, down: false } }));
+    send({ type: "inputs", events });
+  }
+  const COMBOS = {
+    ctrlaltdel: ["ControlLeft", "AltLeft", "Delete"],
+    ctrlshiftesc: ["ControlLeft", "ShiftLeft", "Escape"],
+    altf4: ["AltLeft", "F4"], alttab: ["AltLeft", "Tab"],
+    ctrlesc: ["ControlLeft", "Escape"],
+    wind: ["MetaLeft"], wine: ["MetaLeft"], winr: ["MetaLeft"], winl: ["MetaLeft"],
+    printscreen: ["PrintScreen"], escape: ["Escape"],
+  };
+  // Win+<letter> needs the letter as a Char key between Meta down/up.
+  const COMBO_CHAR = { wind: "d", wine: "e", winr: "r", winl: "l" };
+  $("combo").addEventListener("change", () => {
+    const v = $("combo").value; $("combo").value = "";
+    if (!v) return;
+    if (COMBO_CHAR[v]) {
+      if (!live || viewOnly()) return;
+      send({ type: "inputs", events: [
+        { Key: { key: { Named: "MetaLeft" }, down: true } },
+        { Key: { key: { Char: COMBO_CHAR[v] }, down: true } },
+        { Key: { key: { Char: COMBO_CHAR[v] }, down: false } },
+        { Key: { key: { Named: "MetaLeft" }, down: false } },
+      ] });
+    } else if (COMBOS[v]) combo(COMBOS[v]);
+    canvas.focus();
   });
 
-  $("connect").addEventListener("click", connect);
+  const KEYBAR = [
+    ["Esc", "Escape", false], ["Tab", "Tab", false], ["Ctrl", "ControlLeft", true],
+    ["Alt", "AltLeft", true], ["Shift", "ShiftLeft", true], ["Win", "MetaLeft", true],
+    ["←", "ArrowLeft", false], ["↑", "ArrowUp", false], ["↓", "ArrowDown", false], ["→", "ArrowRight", false],
+    ["Enter", "Enter", false], ["⌫", "Backspace", false], ["Del", "Delete", false], ["␣", "Space", false],
+  ];
+  KEYBAR.forEach(([label, named, sticky]) => {
+    const b = document.createElement("button");
+    b.type = "button"; b.className = "ghost"; b.textContent = label;
+    b.addEventListener("click", () => {
+      if (!live || viewOnly()) return;
+      if (sticky) {
+        const nowActive = !b.classList.contains("active");
+        b.classList.toggle("active", nowActive);
+        sendKey({ Named: named }, nowActive);
+      } else {
+        sendKey({ Named: named }, true); sendKey({ Named: named }, false);
+      }
+    });
+    $("keybar").appendChild(b);
+  });
+  const kbdBtn = document.createElement("button");
+  kbdBtn.type = "button"; kbdBtn.className = "ghost"; kbdBtn.textContent = "⌨ Keyboard";
+  kbdBtn.addEventListener("click", () => mobileInput.focus());
+  $("keybar").appendChild(kbdBtn);
+  $("keybarBtn").addEventListener("click", () => document.body.classList.toggle("keybar-open"));
+
+  // ---------------- paste text ----------------
+  $("pasteBtn").addEventListener("click", () => {
+    document.body.classList.toggle("paste-open");
+    if (document.body.classList.contains("paste-open")) $("pasteText").focus();
+  });
+  $("pasteClose").addEventListener("click", () => { document.body.classList.remove("paste-open"); canvas.focus(); });
+  $("pasteClip").addEventListener("click", async () => {
+    try { $("pasteText").value = await navigator.clipboard.readText(); }
+    catch (e) { setStatus("Clipboard read was blocked by the browser — paste into the box instead (Ctrl+V).", "err"); }
+  });
+  $("pasteSend").addEventListener("click", () => {
+    const text = $("pasteText").value;
+    if (!text) return;
+    document.body.classList.remove("paste-open");
+    canvas.focus();
+    // Focus/click target first on the remote screen, then type.
+    setTimeout(() => sendInput({ Text: text }), 60);
+  });
+
+  // ---------------- toolbar wiring ----------------
+  let streamTimer = 0;
+  function pushStream() {
+    clearTimeout(streamTimer);
+    streamTimer = setTimeout(() => {
+      if (!live) return;
+      send({
+        type: "stream",
+        monitor: lastParams ? lastParams.monitor : 0,
+        quality: parseInt($("liveQuality").value, 10) || 70,
+        fps: parseInt($("liveFps").value, 10) || 15,
+      });
+    }, 250);
+  }
+  $("liveQuality").addEventListener("input", pushStream);
+  $("liveFps").addEventListener("change", pushStream);
+  $("scale").addEventListener("change", () => { stage.dataset.scale = $("scale").value; });
+  $("fullscreen").addEventListener("click", async () => {
+    try {
+      if (!document.fullscreenElement) {
+        await stage.requestFullscreen();
+        // Chrome: capture Esc/F-keys for the remote while fullscreen.
+        if (navigator.keyboard && navigator.keyboard.lock) navigator.keyboard.lock().catch(() => {});
+      } else await document.exitFullscreen();
+    } catch (e) {}
+    canvas.focus();
+  });
+  document.addEventListener("fullscreenchange", () => {
+    $("fullscreen").textContent = document.fullscreenElement ? "Exit fullscreen" : "Fullscreen";
+  });
+
+  $("formRow").addEventListener("submit", (e) => { e.preventDefault(); connect(); });
   $("disconnect").addEventListener("click", disconnect);
-  $("fullscreen").addEventListener("click", () => {
-    const stage = $("stage");
-    if (!document.fullscreenElement) stage.requestFullscreen?.(); else document.exitFullscreen?.();
-  });
 })();
 </script>
 </body>

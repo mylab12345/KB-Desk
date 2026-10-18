@@ -78,10 +78,17 @@ pub enum InputEvent {
     MouseScroll { dx: i32, dy: i32 },
     /// Keyboard press/release.
     Key { key: KeySpec, down: bool },
+    /// Type a whole string into the host (clipboard-paste style input).
+    /// Injected as text by the host, so layout and casing are preserved.
+    Text(String),
+    /// Release every key and mouse button the host is currently holding.
+    /// Viewers send this on focus loss / disconnect so the controlled machine
+    /// never ends up with stuck modifiers or a stuck mouse button.
+    ReleaseAll,
 }
 
 /// Mouse buttons we model. Kept small and portable.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum MouseButton {
     Left,
     Middle,
@@ -134,6 +141,15 @@ pub fn decode_video(payload: &[u8]) -> Result<VideoFrame> {
         monitor,
         jpeg: payload[5..].to_vec(),
     })
+}
+
+/// Normalise a host identity as typed by a human: strip whitespace and
+/// dashes, so `"544 228 382"` and `"544-228-382"` both match `"544228382"`.
+/// Used by the relay and the web bridge so every side agrees.
+pub fn normalize_id(raw: &str) -> String {
+    raw.chars()
+        .filter(|c| !c.is_whitespace() && *c != '-')
+        .collect()
 }
 
 /// Generate a 9-digit numeric identity, in the style remote-desktop users
@@ -191,6 +207,28 @@ mod tests {
         assert_eq!(decoded.height, 1080);
         assert_eq!(decoded.monitor, 2);
         assert_eq!(decoded.jpeg, vec![0xff, 0xd8, 0xff, 0xd9]);
+    }
+
+    #[test]
+    fn text_and_release_all_roundtrip() {
+        let text = Control::Input(InputEvent::Text("päss word".into()));
+        match Control::decode(&text.encode()).unwrap() {
+            Control::Input(InputEvent::Text(s)) => assert_eq!(s, "päss word"),
+            other => panic!("unexpected: {other:?}"),
+        }
+        let release = Control::Input(InputEvent::ReleaseAll);
+        assert!(matches!(
+            Control::decode(&release.encode()).unwrap(),
+            Control::Input(InputEvent::ReleaseAll)
+        ));
+    }
+
+    #[test]
+    fn ids_normalise_spaces_and_dashes() {
+        assert_eq!(normalize_id("544 228 382"), "544228382");
+        assert_eq!(normalize_id(" 544-228-382 "), "544228382");
+        assert_eq!(normalize_id("544228382"), "544228382");
+        assert_eq!(normalize_id(""), "");
     }
 
     #[test]

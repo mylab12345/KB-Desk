@@ -13,8 +13,8 @@ mod input;
 use anyhow::{bail, Context, Result};
 use clap::Parser;
 use kbdesk_core::{
-    encode_video, read_packet, write_packet, Control, Role, VideoFrame, DEFAULT_PORT, KIND_CONTROL,
-    KIND_VIDEO, PROTOCOL_VERSION,
+    encode_video, read_packet, write_packet, Control, InputEvent, Role, VideoFrame, DEFAULT_PORT,
+    KIND_CONTROL, KIND_VIDEO, PROTOCOL_VERSION,
 };
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -87,10 +87,11 @@ struct StreamState {
     params: Mutex<(u8, u8, u8)>,
 }
 
-enum OutPacket {
-    Control(Control),
-    Video(VideoFrame),
-}
+/// Video frames may be dropped, control messages may not — so they travel on
+/// separate channels to the writer task (see `run_session`): control is
+/// unbounded, video is a tiny bounded queue where a slow viewer simply loses
+/// frames instead of accumulating unbounded latency.
+const VIDEO_QUEUE: usize = 2;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -205,6 +206,7 @@ async fn connect_and_register(server: &str, cfg: &SessionCfg) -> Result<(String,
     let stream = TcpStream::connect(server)
         .await
         .with_context(|| format!("connecting to relay {server}"))?;
+    let _ = stream.set_nodelay(true);
     let (mut reader, mut writer) = stream.into_split();
 
     write_packet(
@@ -231,22 +233,34 @@ async fn connect_and_register(server: &str, cfg: &SessionCfg) -> Result<(String,
 
 /// Serve one authenticated viewer on an established connection.
 async fn run_session(stream: TcpStream, cfg: SessionCfg) -> Result<()> {
+    let _ = stream.set_nodelay(true);
     let (mut reader, mut writer) = stream.into_split();
-    let (out_tx, mut out_rx) = mpsc::unbounded_channel::<OutPacket>();
+    let (ctl_tx, mut ctl_rx) = mpsc::unbounded_channel::<Control>();
+    let (vid_tx, mut vid_rx) = mpsc::channel::<VideoFrame>(VIDEO_QUEUE);
 
-    // Dedicated writer: serialises frames so the read loop never blocks on I/O.
+    // Dedicated writer: serialises frames so the read loop never blocks on
+    // I/O. Control is drained with priority; video is best-effort.
     let writer_task = tokio::spawn(async move {
-        while let Some(packet) = out_rx.recv().await {
-            let result = match packet {
-                OutPacket::Control(control) => {
-                    write_packet(&mut writer, KIND_CONTROL, &control.encode()).await
-                }
-                OutPacket::Video(frame) => {
-                    write_packet(&mut writer, KIND_VIDEO, &encode_video(&frame)).await
-                }
-            };
-            if result.is_err() {
-                break;
+        let (mut ctl_open, mut vid_open) = (true, true);
+        while ctl_open || vid_open {
+            tokio::select! {
+                biased;
+                msg = ctl_rx.recv(), if ctl_open => match msg {
+                    Some(control) => {
+                        if write_packet(&mut writer, KIND_CONTROL, &control.encode()).await.is_err() {
+                            break;
+                        }
+                    }
+                    None => ctl_open = false,
+                },
+                frame = vid_rx.recv(), if vid_open => match frame {
+                    Some(frame) => {
+                        if write_packet(&mut writer, KIND_VIDEO, &encode_video(&frame)).await.is_err() {
+                            break;
+                        }
+                    }
+                    None => vid_open = false,
+                },
             }
         }
     });
@@ -266,29 +280,35 @@ async fn run_session(stream: TcpStream, cfg: SessionCfg) -> Result<()> {
     }
 
     // Introduce ourselves.
-    let _ = out_tx.send(OutPacket::Control(Control::Hello {
+    let _ = ctl_tx.send(Control::Hello {
         version: PROTOCOL_VERSION,
         role: Role::Host,
         id: cfg.id.clone(),
-    }));
+    });
 
-    // Authenticate.
-    let auth = read_packet(&mut reader).await.context("waiting for auth")?;
+    // Authenticate (the viewer is connected by now, so a timeout is safe;
+    // the *first* read above must stay untimed — in relay mode it is what
+    // parks the host until a viewer is paired with it).
+    let auth = tokio::time::timeout(Duration::from_secs(30), read_packet(&mut reader))
+        .await
+        .context("timed out waiting for auth")??;
     let ok = match Control::decode(&auth.payload)? {
         Control::Auth { password } => password == cfg.password,
         other => {
-            let _ = out_tx.send(OutPacket::Control(Control::Error(format!(
-                "expected auth, got {other:?}"
-            ))));
+            let _ = ctl_tx.send(Control::Error(format!("expected auth, got {other:?}")));
             false
         }
     };
-    let _ = out_tx.send(OutPacket::Control(Control::AuthResult {
+    let _ = ctl_tx.send(Control::AuthResult {
         ok,
         reason: if ok { "ok".into() } else { "incorrect password".into() },
-    }));
+    });
     if !ok {
         info!("rejected viewer: incorrect password");
+        // Flush the AuthResult before closing so the viewer sees *why*.
+        drop(ctl_tx);
+        drop(vid_tx);
+        let _ = tokio::time::timeout(Duration::from_secs(2), writer_task).await;
         return Ok(());
     }
     info!("viewer authenticated");
@@ -302,7 +322,7 @@ async fn run_session(stream: TcpStream, cfg: SessionCfg) -> Result<()> {
 
     // Capture thread (own OS thread; owns the platform capture handle).
     let capture_state = state.clone();
-    let capture_tx = out_tx.clone();
+    let capture_tx = vid_tx.clone();
     let capture_thread = std::thread::Builder::new()
         .name("kbdesk-capture".into())
         .spawn(move || {
@@ -340,8 +360,12 @@ async fn run_session(stream: TcpStream, cfg: SessionCfg) -> Result<()> {
                             monitor,
                             jpeg,
                         };
-                        if capture_tx.send(OutPacket::Video(frame)).is_err() {
-                            break;
+                        // Latest-frame-wins: if the viewer/network is behind,
+                        // drop this frame instead of queueing stale video.
+                        match capture_tx.try_send(frame) {
+                            Ok(()) => {}
+                            Err(mpsc::error::TrySendError::Full(_)) => {}
+                            Err(mpsc::error::TrySendError::Closed(_)) => break,
                         }
                     }
                     Err(e) => {
@@ -372,12 +396,14 @@ async fn run_session(stream: TcpStream, cfg: SessionCfg) -> Result<()> {
                 quality,
                 fps,
             }) => {
+                let quality = quality.clamp(1, 100);
+                let fps = fps.clamp(1, 60);
                 {
                     let mut params = state.params.lock().unwrap();
                     *params = (quality, fps, monitor as u8);
                 }
                 state.streaming.store(true, Ordering::Relaxed);
-                info!(monitor, quality, fps, "streaming started");
+                info!(monitor, quality, fps, "streaming started/updated");
             }
             Ok(Control::StopStream) => {
                 state.streaming.store(false, Ordering::Relaxed);
@@ -388,7 +414,7 @@ async fn run_session(stream: TcpStream, cfg: SessionCfg) -> Result<()> {
                 input.send(event);
             }
             Ok(Control::Ping(t)) => {
-                let _ = out_tx.send(OutPacket::Control(Control::Pong(t)));
+                let _ = ctl_tx.send(Control::Pong(t));
             }
             Ok(Control::Error(message)) => warn!("viewer reported: {message}"),
             Ok(Control::Hello { .. }) => {}
@@ -397,9 +423,14 @@ async fn run_session(stream: TcpStream, cfg: SessionCfg) -> Result<()> {
         }
     }
 
+    // Never leave the controlled machine with keys/buttons held down.
+    input.send(InputEvent::ReleaseAll);
+    drop(input);
+
     state.streaming.store(false, Ordering::Relaxed);
     state.stop.store(true, Ordering::Relaxed);
-    drop(out_tx);
+    drop(ctl_tx);
+    drop(vid_tx);
     let _ = capture_thread.join();
     let _ = writer_task.await;
     info!("session closed");

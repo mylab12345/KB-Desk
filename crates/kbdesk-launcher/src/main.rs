@@ -5,6 +5,8 @@
 //!
 //!   kbdesk up       relay + host + web viewer on this machine
 //!   kbdesk web      host + web viewer (no relay)
+//!   kbdesk serve    relay + web viewer only (run on a server; hosts anywhere
+//!                   register with it, browsers anywhere control them by id)
 //!   kbdesk host     host sharing this screen directly
 //!   kbdesk relay    relay/rendezvous server only
 //!   kbdesk viewer   native desktop viewer
@@ -73,6 +75,11 @@ enum Cmd {
     Up,
     /// Host + web viewer, no relay (viewers enter this machine's address).
     Web,
+    /// Relay + web viewer only — the browser front door for hosts anywhere.
+    /// Run this on a LAN/VPS server: controlled machines run
+    /// `kbdesk-host --server <this-host>:<relay-port>`, and anyone can then
+    /// control them from a browser at http://<this-host>:<web-port>/.
+    Serve,
     /// Share this screen, accepting direct connections.
     Host,
     /// Run the relay/rendezvous server only.
@@ -178,6 +185,48 @@ fn run() -> Result<()> {
 
             let host_addr = format!("127.0.0.1:{}", cli.host_port);
             banner("direct", &cli, Some(&password), None, Some(&host_addr));
+        }
+        Cmd::Serve => {
+            // Relay faces the network (hosts anywhere register with it); the
+            // web bridge also faces the network (browsers anywhere), and it
+            // talks to the relay over loopback.
+            services.push(start(
+                "kbdesk-server",
+                &[
+                    "--bind".into(),
+                    cli.bind.clone(),
+                    "--port".into(),
+                    cli.relay_port.to_string(),
+                ],
+                None,
+            )?);
+
+            services.push(start(
+                "kbdesk-web",
+                &[
+                    "--listen".into(),
+                    format!("{}:{}", cli.bind, cli.web_port),
+                    "--relay".into(),
+                    format!("127.0.0.1:{}", cli.relay_port),
+                ],
+                None,
+            )?);
+
+            let ip = local_ip().unwrap_or_else(|| "localhost".to_string());
+            let line = "─".repeat(60);
+            println!("{line}");
+            println!("  KB-Desk relay + browser viewer are running");
+            println!("{line}");
+            println!("  1. On each machine to control, run:");
+            println!(
+                "       kbdesk-host --server {ip}:{} --password <pw>",
+                cli.relay_port
+            );
+            println!("     (it prints a 9-digit ID; use a different password per machine)");
+            println!("  2. To control it, open in any browser:");
+            println!("       http://{ip}:{}", cli.web_port);
+            println!("     and enter that ID + its password. Nothing to install.");
+            println!("{line}");
         }
         Cmd::Relay => {
             services.push(start(

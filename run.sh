@@ -6,6 +6,7 @@
 #
 #     ./run.sh              # relay + host + web viewer  (viewers need only an ID)
 #     ./run.sh web          # host + web viewer, no relay
+#     ./run.sh serve        # relay + web viewer (server: control hosts from any browser)
 #     ./run.sh host         # share this screen (direct)
 #     ./run.sh relay        # run the relay server only
 #     ./run.sh viewer       # native desktop viewer
