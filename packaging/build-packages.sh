@@ -86,6 +86,8 @@ stage_common() {
         "$dest/usr/lib/systemd/user/kbdesk-host.service"
     install -m 0644 "$ROOT/packaging/kbdesk-web.env" \
         "$dest/etc/kbdesk/kbdesk-web.env"
+    install -m 0644 "$ROOT/packaging/kbdesk-server.env" \
+        "$dest/etc/kbdesk/kbdesk-server.env"
     install -m 0644 "$ROOT/packaging/kbdesk-host.env" \
         "$dest/etc/kbdesk/kbdesk-host.env"
     install -m 0644 "$ROOT/README.md" "$dest/usr/share/doc/kbdesk/README.md"

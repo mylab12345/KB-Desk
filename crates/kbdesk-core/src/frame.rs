@@ -35,6 +35,28 @@ pub async fn write_packet<W: AsyncWrite + Unpin>(
     Ok(())
 }
 
+/// Write one frame with its payload end-to-end encrypted (protocol v2).
+/// Framing and `kind` stay visible for routing; the payload is ciphertext.
+pub async fn write_secure_packet<W: AsyncWrite + Unpin>(
+    writer: &mut W,
+    cipher: &mut crate::crypto::SessionCipher,
+    kind: u8,
+    payload: &[u8],
+) -> Result<()> {
+    let wire = cipher.encrypt(kind, payload);
+    write_packet(writer, kind, &wire).await
+}
+
+/// Read one frame written by [`write_secure_packet`] and decrypt its payload.
+pub async fn read_secure_packet<R: AsyncRead + Unpin>(
+    reader: &mut R,
+    cipher: &mut crate::crypto::SessionCipher,
+) -> Result<Packet> {
+    let packet = read_packet(reader).await?;
+    let payload = cipher.decrypt(packet.kind, &packet.payload)?;
+    Ok(Packet { kind: packet.kind, payload })
+}
+
 /// Read one frame written by [`write_packet`].
 pub async fn read_packet<R: AsyncRead + Unpin>(reader: &mut R) -> Result<Packet> {
     let mut len_bytes = [0u8; 4];

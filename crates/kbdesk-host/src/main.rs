@@ -12,14 +12,17 @@ mod input;
 
 use anyhow::{bail, Context, Result};
 use clap::Parser;
+use kbdesk_core::crypto;
+use kbdesk_core::tls::{self, MaybeTlsStream, TlsAcceptor, TlsClientOptions, TlsServerOptions};
 use kbdesk_core::{
-    encode_video, read_packet, write_packet, Control, InputEvent, Role, VideoFrame, DEFAULT_PORT,
-    KIND_CONTROL, KIND_VIDEO, PROTOCOL_VERSION,
+    encode_video, read_packet, read_secure_packet, write_packet, write_secure_packet, Control,
+    InputEvent, Role, VideoFrame, DEFAULT_PORT, KIND_CONTROL, KIND_VIDEO, PROTOCOL_VERSION,
 };
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
-use tokio::net::{TcpListener, TcpStream};
+use tokio::net::TcpListener;
 use tokio::sync::mpsc;
 use tracing::{info, warn};
 use tracing_subscriber::EnvFilter;
@@ -66,6 +69,33 @@ struct Args {
     /// Monitor index to capture (0 = primary).
     #[arg(long, default_value_t = 0)]
     monitor: u8,
+
+    /// PEM certificate chain for --listen TLS. Env: KB_DESK_TLS_CERT.
+    #[arg(long, env = "KB_DESK_TLS_CERT")]
+    tls_cert: Option<PathBuf>,
+
+    /// PEM private key for --tls-cert. Env: KB_DESK_TLS_KEY.
+    #[arg(long, env = "KB_DESK_TLS_KEY")]
+    tls_key: Option<PathBuf>,
+
+    /// PEM CA certificate(s) to trust when verifying the relay.
+    /// Env: KB_DESK_TLS_CA.
+    #[arg(long, env = "KB_DESK_TLS_CA")]
+    tls_ca: Option<PathBuf>,
+
+    /// Expected name in the relay's certificate (default: relay host).
+    /// Env: KB_DESK_TLS_SERVER_NAME.
+    #[arg(long, env = "KB_DESK_TLS_SERVER_NAME")]
+    tls_server_name: Option<String>,
+
+    /// Accept any relay certificate. Local development ONLY.
+    #[arg(long)]
+    tls_insecure: bool,
+
+    /// Disable transport TLS entirely. Local development ONLY — the
+    /// viewer<->host session stays end-to-end encrypted regardless.
+    #[arg(long)]
+    allow_plaintext: bool,
 }
 
 #[derive(Clone)]
@@ -75,6 +105,8 @@ struct SessionCfg {
     fps: u8,
     quality: u8,
     monitor: u8,
+    /// TLS settings for the outbound relay connection.
+    relay_tls: TlsClientOptions,
 }
 
 /// Session-wide state shared with the capture thread.
@@ -114,12 +146,25 @@ async fn main() -> Result<()> {
         bail!("nothing to do: pass --listen and/or --server <relay-address>");
     }
 
+    if args.allow_plaintext {
+        warn!("--allow-plaintext: transport TLS disabled (session content is still E2E-encrypted). Do not use beyond local development.");
+    }
+    if args.tls_insecure {
+        warn!("--tls-insecure: relay certificate will not be verified. Local development only.");
+    }
+
     let cfg = SessionCfg {
         id: args.id.clone().unwrap_or_default(),
         password,
         fps: args.fps,
         quality: args.quality,
         monitor: args.monitor,
+        relay_tls: TlsClientOptions {
+            ca_file: args.tls_ca.clone(),
+            server_name: args.tls_server_name.clone(),
+            insecure: args.tls_insecure,
+            allow_plaintext: args.allow_plaintext,
+        },
     };
 
     println!("KB-Desk host ready");
@@ -128,9 +173,15 @@ async fn main() -> Result<()> {
     let mut tasks = Vec::new();
 
     if args.listen {
+        // Build the acceptor up-front so missing certs fail fast and loudly.
+        let acceptor = tls::tls_acceptor(&TlsServerOptions {
+            cert_file: args.tls_cert.clone(),
+            key_file: args.tls_key.clone(),
+            allow_plaintext: args.allow_plaintext,
+        })?;
         let addr = format!("{}:{}", args.bind, args.port);
         let cfg = cfg.clone();
-        tasks.push(tokio::spawn(async move { run_listener(addr, cfg).await }));
+        tasks.push(tokio::spawn(async move { run_listener(addr, cfg, acceptor).await }));
     }
 
     if let Some(server) = args.server.clone() {
@@ -146,11 +197,11 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-async fn run_listener(addr: String, cfg: SessionCfg) -> Result<()> {
+async fn run_listener(addr: String, cfg: SessionCfg, acceptor: Option<TlsAcceptor>) -> Result<()> {
     let listener = TcpListener::bind(&addr)
         .await
         .with_context(|| format!("binding listener at {addr}"))?;
-    info!("listening for direct connections on {addr}");
+    info!(tls = acceptor.is_some(), "listening for direct connections on {addr}");
 
     loop {
         let (stream, peer) = match listener.accept().await {
@@ -162,7 +213,15 @@ async fn run_listener(addr: String, cfg: SessionCfg) -> Result<()> {
         };
         info!(%peer, "viewer connected");
         let cfg = cfg.clone();
+        let acceptor = acceptor.clone();
         tokio::spawn(async move {
+            let stream = match tls::accept(stream, acceptor.as_ref()).await {
+                Ok(stream) => stream,
+                Err(e) => {
+                    warn!(%peer, "TLS accept failed: {e:#}");
+                    return;
+                }
+            };
             if let Err(e) = run_session(stream, cfg).await {
                 warn!(%peer, "session ended: {e:#}");
             }
@@ -202,12 +261,12 @@ async fn register_with_relay(server: &str, cfg: SessionCfg) -> Result<()> {
 }
 
 /// One registration attempt: connect, announce ourselves, learn our id.
-async fn connect_and_register(server: &str, cfg: &SessionCfg) -> Result<(String, TcpStream)> {
-    let stream = TcpStream::connect(server)
+async fn connect_and_register(server: &str, cfg: &SessionCfg) -> Result<(String, MaybeTlsStream)> {
+    let stream = tls::connect(server, &cfg.relay_tls)
         .await
         .with_context(|| format!("connecting to relay {server}"))?;
     let _ = stream.set_nodelay(true);
-    let (mut reader, mut writer) = stream.into_split();
+    let (mut reader, mut writer) = tokio::io::split(stream);
 
     write_packet(
         &mut writer,
@@ -227,19 +286,34 @@ async fn connect_and_register(server: &str, cfg: &SessionCfg) -> Result<(String,
         other => bail!("relay refused registration: {other:?}"),
     };
 
-    let stream = reader.reunite(writer).context("reassembling relay stream")?;
-    Ok((id, stream))
+    Ok((id, reader.unsplit(writer)))
 }
 
-/// Serve one authenticated viewer on an established connection.
-async fn run_session(stream: TcpStream, cfg: SessionCfg) -> Result<()> {
+/// Serve one viewer on an established (TLS or relay-pumped) connection.
+/// The v2 handshake runs first and mutually authenticates both sides
+/// through the password-bound key exchange; from then on every frame is
+/// end-to-end encrypted — the relay/bridge forwarding this stream sees
+/// only ciphertext.
+async fn run_session(stream: MaybeTlsStream, cfg: SessionCfg) -> Result<()> {
     let _ = stream.set_nodelay(true);
-    let (mut reader, mut writer) = stream.into_split();
+    let (mut reader, mut writer) = tokio::io::split(stream);
+
+    // Handshake + mutual key confirmation (the first read parks untimed so
+    // a relay-registered host can wait indefinitely for a viewer).
+    let session = crypto::host_handshake(&mut reader, &mut writer, &cfg.id, &cfg.password)
+        .await
+        .context("encrypted session handshake")?;
+    info!("viewer connected: end-to-end encrypted session established");
+    let mut rx_cipher = session.recv;
+    let mut tx_cipher = session.send;
+
     let (ctl_tx, mut ctl_rx) = mpsc::unbounded_channel::<Control>();
     let (vid_tx, mut vid_rx) = mpsc::channel::<VideoFrame>(VIDEO_QUEUE);
 
     // Dedicated writer: serialises frames so the read loop never blocks on
-    // I/O. Control is drained with priority; video is best-effort.
+    // I/O. Control is drained with priority; video is best-effort. Frames are
+    // dropped (when a viewer lags) *before* encryption, so AEAD frame
+    // counters stay strictly sequential for the receiver.
     let writer_task = tokio::spawn(async move {
         let (mut ctl_open, mut vid_open) = (true, true);
         while ctl_open || vid_open {
@@ -247,7 +321,7 @@ async fn run_session(stream: TcpStream, cfg: SessionCfg) -> Result<()> {
                 biased;
                 msg = ctl_rx.recv(), if ctl_open => match msg {
                     Some(control) => {
-                        if write_packet(&mut writer, KIND_CONTROL, &control.encode()).await.is_err() {
+                        if write_secure_packet(&mut writer, &mut tx_cipher, KIND_CONTROL, &control.encode()).await.is_err() {
                             break;
                         }
                     }
@@ -255,7 +329,7 @@ async fn run_session(stream: TcpStream, cfg: SessionCfg) -> Result<()> {
                 },
                 frame = vid_rx.recv(), if vid_open => match frame {
                     Some(frame) => {
-                        if write_packet(&mut writer, KIND_VIDEO, &encode_video(&frame)).await.is_err() {
+                        if write_secure_packet(&mut writer, &mut tx_cipher, KIND_VIDEO, &encode_video(&frame)).await.is_err() {
                             break;
                         }
                     }
@@ -264,54 +338,6 @@ async fn run_session(stream: TcpStream, cfg: SessionCfg) -> Result<()> {
             }
         }
     });
-
-    // Handshake: viewer speaks first with a Hello.
-    let first = read_packet(&mut reader)
-        .await
-        .context("waiting for viewer hello")?;
-    if first.kind != KIND_CONTROL {
-        bail!("viewer's first frame was not a control frame");
-    }
-    match Control::decode(&first.payload)? {
-        Control::Hello {
-            role: Role::Viewer, ..
-        } => {}
-        other => bail!("unexpected first message from viewer: {other:?}"),
-    }
-
-    // Introduce ourselves.
-    let _ = ctl_tx.send(Control::Hello {
-        version: PROTOCOL_VERSION,
-        role: Role::Host,
-        id: cfg.id.clone(),
-    });
-
-    // Authenticate (the viewer is connected by now, so a timeout is safe;
-    // the *first* read above must stay untimed — in relay mode it is what
-    // parks the host until a viewer is paired with it).
-    let auth = tokio::time::timeout(Duration::from_secs(30), read_packet(&mut reader))
-        .await
-        .context("timed out waiting for auth")??;
-    let ok = match Control::decode(&auth.payload)? {
-        Control::Auth { password } => password == cfg.password,
-        other => {
-            let _ = ctl_tx.send(Control::Error(format!("expected auth, got {other:?}")));
-            false
-        }
-    };
-    let _ = ctl_tx.send(Control::AuthResult {
-        ok,
-        reason: if ok { "ok".into() } else { "incorrect password".into() },
-    });
-    if !ok {
-        info!("rejected viewer: incorrect password");
-        // Flush the AuthResult before closing so the viewer sees *why*.
-        drop(ctl_tx);
-        drop(vid_tx);
-        let _ = tokio::time::timeout(Duration::from_secs(2), writer_task).await;
-        return Ok(());
-    }
-    info!("viewer authenticated");
 
     let state = Arc::new(StreamState {
         streaming: AtomicBool::new(false),
@@ -381,11 +407,15 @@ async fn run_session(stream: TcpStream, cfg: SessionCfg) -> Result<()> {
             }
         })?;
 
-    // Control loop.
+    // Control loop (every frame decrypted; counter/decryption failure ends
+    // the session — tampering or a desynchronised peer must not continue).
     loop {
-        let packet = match read_packet(&mut reader).await {
+        let packet = match read_secure_packet(&mut reader, &mut rx_cipher).await {
             Ok(packet) => packet,
-            Err(_) => break,
+            Err(e) => {
+                warn!("session stream ended: {e:#}");
+                break;
+            }
         };
         if packet.kind != KIND_CONTROL {
             continue;

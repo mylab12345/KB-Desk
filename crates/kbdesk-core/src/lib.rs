@@ -19,10 +19,15 @@
 //! The design is intentionally minimal and is our own; it does not copy the
 //! framing of any other project.
 
+pub mod crypto;
 pub mod frame;
 pub mod protocol;
+pub mod tls;
 
-pub use frame::{read_packet, write_packet, Packet, KIND_CONTROL, KIND_VIDEO, MAX_MESSAGE};
+pub use frame::{
+    read_packet, read_secure_packet, write_packet, write_secure_packet, Packet, KIND_CONTROL,
+    KIND_VIDEO, MAX_MESSAGE,
+};
 pub use protocol::{
     decode_video, encode_video, generate_id, normalize_id, Control, InputEvent, KeySpec,
     MouseButton, Role, VideoFrame, PROTOCOL_VERSION,

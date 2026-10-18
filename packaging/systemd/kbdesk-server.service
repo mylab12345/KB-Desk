@@ -6,6 +6,10 @@ Wants=network-online.target
 
 [Service]
 Type=simple
+# TLS is mandatory; KB_DESK_TLS_CERT / KB_DESK_TLS_KEY come from this file
+# (see kbdesk-server.env next to it). The PEM files must be readable by the
+# dynamic service user (world-readable, or LoadCredential= for the key).
+EnvironmentFile=-/etc/kbdesk/kbdesk-server.env
 ExecStart=/usr/bin/kbdesk-server --bind 0.0.0.0 --port 21118
 Restart=on-failure
 RestartSec=3

@@ -1,21 +1,25 @@
-//! KB-Desk web viewer.
+//! KB-Desk web viewer (blind bridge).
 //!
-//! Serves a browser page that acts as a viewer: a WebSocket bridges the
-//! browser to the same framed TCP protocol the native client uses. The browser
-//! sends JSON commands and input events; the server streams JPEG frames back as
-//! binary WebSocket messages using the standard KB-Desk video payload layout.
+//! Serves a browser page that is a full KB-Desk viewer in its own right.
+//! Browsers cannot open raw TCP/TLS connections, so this process bridges the
+//! page's WebSocket to the framed TCP/TLS protocol — but it is a *blind* byte
+//! pipe: the page itself performs the protocol-v2 key exchange
+//! (`web/crypto.js`) and encrypts/decrypts every control and video frame, so
+//! this bridge — like the relay — never sees screen contents, input events,
+//! or the password (the page never even sends it here).
 //!
-//! No software has to be installed on the viewing machine — only a browser.
-//! Browsers cannot open raw TCP connections, so this bridge is the piece that
-//! lets a browser reach the (TCP) relay: run it next to the relay
-//! (`kbdesk-web --relay 127.0.0.1:21118`, or `kbdesk serve`) and every visitor
-//! only needs the host's ID + password.
+//! Run it next to the relay (`kbdesk-web --relay relay.example:21118`, or
+//! `kbdesk serve`) and every visitor only needs the host's ID + password.
 //!
-//! Robustness rules for "control it from the browser without issues":
-//!   * every handshake step has a timeout (a dead host fails fast, visibly);
-//!   * video frames are latest-frame-wins end to end (a slow browser/network
-//!     drops frames instead of accumulating ever-growing latency);
-//!   * ending a session releases all held keys/buttons on the host.
+//! Transport encryption is mandatory on both sides of the bridge:
+//!   * browser <-> bridge: HTTPS/WSS (`--tls-cert/--tls-key`); this also
+//!     protects the delivered page itself, whose code handles the password;
+//!   * bridge <-> relay/host: KB-Desk TLS (`--tls-ca` for private CAs).
+//! `--allow-plaintext` disables both, for local development only.
+//!
+//! Trust note: whoever controls this web server controls the page's code,
+//! and the page handles the password. Serve it from infrastructure you
+//! trust, over HTTPS. (The native client needs no web server at all.)
 
 use anyhow::{bail, Context, Result};
 use axum::{
@@ -28,25 +32,30 @@ use axum::{
     routing::get,
     Json, Router,
 };
+use axum_server::tls_rustls::RustlsConfig;
 use clap::Parser;
 use futures_util::stream::SplitStream;
 use futures_util::{SinkExt, StreamExt};
-use kbdesk_core::{
-    normalize_id, read_packet, write_packet, Control, InputEvent, Packet, Role, KIND_CONTROL,
-    KIND_VIDEO, PROTOCOL_VERSION,
-};
+use kbdesk_core::tls::{self, MaybeTlsStream, TlsClientOptions, TlsServerOptions};
+use kbdesk_core::{normalize_id, write_packet, Control, KIND_CONTROL};
 use serde::Deserialize;
+use std::net::SocketAddr;
+use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Duration;
-use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
-use tokio::net::TcpStream;
+use tokio::io::{AsyncReadExt, AsyncWriteExt, ReadHalf, WriteHalf};
 use tokio::sync::mpsc;
 use tracing::{info, warn};
 use tracing_subscriber::EnvFilter;
 
-/// TCP connect + each handshake read gets this long before we give up.
-const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
-/// Browser-bound queue depth (video is dropped past this, never queued up).
-const OUT_QUEUE: usize = 8;
+/// TCP+TLS connect to relay/host gets this long before we give up.
+const DIAL_TIMEOUT: Duration = Duration::from_secs(10);
+/// Browser-bound queue depth. Unlike the old translating bridge we can never
+/// drop bytes (the page's AEAD counters are strict), so a slow browser
+/// back-pressures the host, which drops frames *before* encryption instead.
+const OUT_QUEUE: usize = 32;
+/// Raw chunk size shovelled between the TCP side and the WebSocket.
+const CHUNK: usize = 64 * 1024;
 
 #[derive(Parser, Debug)]
 #[command(
@@ -64,42 +73,50 @@ struct Args {
     /// direct host address, which is safer to leave unset on public deployments.
     #[arg(long)]
     relay: Option<String>,
+
+    /// PEM certificate chain for HTTPS. Env: KB_DESK_TLS_CERT.
+    #[arg(long, env = "KB_DESK_TLS_CERT")]
+    tls_cert: Option<PathBuf>,
+
+    /// PEM private key for --tls-cert. Env: KB_DESK_TLS_KEY.
+    #[arg(long, env = "KB_DESK_TLS_KEY")]
+    tls_key: Option<PathBuf>,
+
+    /// PEM CA certificate(s) to trust for the relay/host TLS leg.
+    /// Env: KB_DESK_TLS_CA.
+    #[arg(long, env = "KB_DESK_TLS_CA")]
+    tls_ca: Option<PathBuf>,
+
+    /// Expected name in the relay/host certificate (default: its host).
+    /// Env: KB_DESK_TLS_SERVER_NAME.
+    #[arg(long, env = "KB_DESK_TLS_SERVER_NAME")]
+    tls_server_name: Option<String>,
+
+    /// Accept any relay/host certificate. Local development ONLY.
+    #[arg(long)]
+    tls_insecure: bool,
+
+    /// Serve plain HTTP and dial without TLS. Local development ONLY —
+    /// session content stays end-to-end encrypted between the page and host.
+    #[arg(long)]
+    allow_plaintext: bool,
 }
 
 #[derive(Clone)]
 struct AppState {
     relay: Option<String>,
+    tls_client: TlsClientOptions,
 }
 
-/// Messages the browser sends to us, tagged by `type`.
+/// The only command the bridge itself understands: open a byte pipe.
+/// Deliberately has no password field — authentication happens end-to-end
+/// between the page and the host, inside the pipe.
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type", rename_all = "lowercase")]
 enum BrowserMsg {
-    Connect {
+    Dial {
         id: Option<String>,
         address: Option<String>,
-        password: String,
-        monitor: Option<u32>,
-        quality: Option<u8>,
-        fps: Option<u8>,
-    },
-    Input {
-        event: InputEvent,
-    },
-    /// Several input events in one message (e.g. a key combination).
-    Inputs {
-        events: Vec<InputEvent>,
-    },
-    /// Change stream parameters mid-session.
-    Stream {
-        monitor: Option<u32>,
-        quality: Option<u8>,
-        fps: Option<u8>,
-    },
-    /// Latency probe; forwarded to the host, whose Pong comes back as
-    /// `{"type":"pong","t":…}` so the browser measures the full path.
-    Ping {
-        t: u64,
     },
     Disconnect,
 }
@@ -114,31 +131,69 @@ async fn main() -> Result<()> {
 
     let args = Args::parse();
 
+    if args.allow_plaintext {
+        warn!("--allow-plaintext: serving HTTP and dialling without TLS (page<->host content is still E2E-encrypted; page delivery is NOT protected). Local development only.");
+    }
+    if args.tls_insecure {
+        warn!("--tls-insecure: relay/host certificates will not be verified. Local development only.");
+    }
+
     let state = AppState {
         relay: args.relay.clone(),
+        tls_client: TlsClientOptions {
+            ca_file: args.tls_ca.clone(),
+            server_name: args.tls_server_name.clone(),
+            insecure: args.tls_insecure,
+            allow_plaintext: args.allow_plaintext,
+        },
     };
 
     let app = Router::new()
         .route("/", get(index))
+        .route("/crypto.js", get(crypto_js))
         .route("/config", get(config))
         .route("/healthz", get(|| async { "ok" }))
         .route("/ws", get(ws_handler))
         .with_state(state);
 
-    let listener = tokio::net::TcpListener::bind(&args.listen)
-        .await
-        .with_context(|| format!("binding web UI at {}", args.listen))?;
+    let server_config = tls::server_config(&TlsServerOptions {
+        cert_file: args.tls_cert.clone(),
+        key_file: args.tls_key.clone(),
+        allow_plaintext: args.allow_plaintext,
+    })?;
 
-    info!(addr = %args.listen, relay = ?args.relay, "kbdesk-web listening");
+    info!(addr = %args.listen, relay = ?args.relay, https = server_config.is_some(), "kbdesk-web listening");
     if args.relay.is_none() {
         warn!("no --relay set: browsers must supply a direct host address");
     }
-    println!("KB-Desk web viewer:  http://{}", args.listen);
+    println!(
+        "KB-Desk web viewer:  {}://{}",
+        if server_config.is_some() { "https" } else { "http" },
+        args.listen
+    );
     if let Some(relay) = &args.relay {
         println!("  relay: {relay}");
     }
 
-    axum::serve(listener, app).await.context("serving web UI")?;
+    match server_config {
+        Some(config) => {
+            let addr: SocketAddr = args
+                .listen
+                .parse()
+                .with_context(|| format!("parsing --listen address {}", args.listen))?;
+            let rustls_config = RustlsConfig::from_config(Arc::new(config));
+            axum_server::bind_rustls(addr, rustls_config)
+                .serve(app.into_make_service())
+                .await
+                .context("serving web UI")?;
+        }
+        None => {
+            let listener = tokio::net::TcpListener::bind(&args.listen)
+                .await
+                .with_context(|| format!("binding web UI at {}", args.listen))?;
+            axum::serve(listener, app).await.context("serving web UI")?;
+        }
+    }
     Ok(())
 }
 
@@ -150,11 +205,23 @@ async fn index() -> impl IntoResponse {
     )
 }
 
+async fn crypto_js() -> impl IntoResponse {
+    (
+        [
+            (header::CACHE_CONTROL, "no-cache"),
+            (header::CONTENT_TYPE, "text/javascript; charset=utf-8"),
+        ],
+        include_str!("../web/crypto.js"),
+    )
+}
+
 async fn config(State(state): State<AppState>) -> Json<serde_json::Value> {
     // Only tell the browser *whether* a relay is configured, not where it is.
     Json(serde_json::json!({
         "relay": state.relay.is_some(),
         "mode": if state.relay.is_some() { "relay" } else { "direct" },
+        "e2e": true,
+        "protocol": kbdesk_core::PROTOCOL_VERSION,
     }))
 }
 
@@ -168,6 +235,10 @@ fn status_msg(message: &str) -> Message {
 
 fn error_msg(message: &str) -> Message {
     Message::text(serde_json::json!({ "type": "error", "message": message }).to_string())
+}
+
+fn ready_msg() -> Message {
+    Message::text(serde_json::json!({ "type": "ready" }).to_string())
 }
 
 fn ended_msg() -> Message {
@@ -184,8 +255,7 @@ async fn send_error(out: &mpsc::Sender<Message>, message: &str) {
 
 async fn handle_socket(socket: WebSocket, state: AppState) {
     let (mut ws_tx, mut ws_rx) = socket.split();
-    // Bounded: a browser that cannot keep up drops video frames (try_send in
-    // the session loop) instead of building an ever-growing backlog.
+    // Bounded: back-pressure propagates to the host (see OUT_QUEUE docs).
     let (out_tx, mut out_rx) = mpsc::channel::<Message>(OUT_QUEUE);
 
     // Dedicated writer so the bridge never blocks on a slow browser.
@@ -204,43 +274,30 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
     let _ = writer.await;
 }
 
-/// Wait for a connect request, run one session, then wait again — so a failed
-/// attempt (wrong password, host offline) can be retried on the same socket.
+/// Wait for a dial request, open one byte pipe, then wait again — so a failed
+/// attempt (host offline) can be retried on the same socket. Each dial uses a
+/// fresh TCP/TLS connection because an AEAD session cannot be resumed.
 async fn drive(
     ws_rx: &mut SplitStream<WebSocket>,
     out: &mpsc::Sender<Message>,
     state: &AppState,
 ) -> Result<()> {
     loop {
-        // --- wait for a Connect command from the browser ---
-        let (id, address, password, monitor, quality, fps) = loop {
+        // --- wait for a dial command from the browser ---
+        let (id, address) = loop {
             match ws_rx.next().await {
                 Some(Ok(Message::Text(text))) => match serde_json::from_str::<BrowserMsg>(text.as_str()) {
-                    Ok(BrowserMsg::Connect {
-                        id,
-                        address,
-                        password,
-                        monitor,
-                        quality,
-                        fps,
-                    }) => {
-                        break (
-                            id,
-                            address,
-                            password,
-                            monitor.unwrap_or(0),
-                            quality.unwrap_or(70).clamp(1, 100),
-                            fps.unwrap_or(15).clamp(1, 60),
-                        )
-                    }
+                    Ok(BrowserMsg::Dial { id, address }) => break (id, address),
                     Ok(BrowserMsg::Disconnect) => {
                         send_status(out, "disconnected").await;
                     }
-                    Ok(_) => {}
                     Err(e) => {
                         send_error(out, &format!("bad message: {e}")).await;
                     }
                 },
+                Some(Ok(Message::Binary(_))) => {
+                    send_error(out, "send a dial command before session data").await;
+                }
                 Some(Ok(Message::Close(_))) | None => return Ok(()),
                 Some(Ok(_)) => {}
                 Some(Err(_)) => return Ok(()),
@@ -283,10 +340,14 @@ async fn drive(
             Some(id) => send_status(out, &format!("connecting to host {id} via relay…")).await,
             None => send_status(out, &format!("connecting to {target}…")).await,
         }
-        match start_session(&target, relay_id.as_deref(), &password, monitor, quality, fps).await {
+        match start_pipe(&target, relay_id.as_deref(), &state.tls_client).await {
             Ok((reader, writer)) => {
-                send_status(out, "connected; streaming").await;
-                if let Err(e) = session(ws_rx, out, reader, writer, monitor).await {
+                // The pipe is open and (in relay mode) paired. Everything
+                // from here is the page<->host conversation: we just carry
+                // bytes, which are ciphertext after the key exchange.
+                let _ = out.send(ready_msg()).await;
+                send_status(out, "pipe open; page is establishing the encrypted session…").await;
+                if let Err(e) = pipe(ws_rx, out, reader, writer).await {
                     send_error(out, &format!("{e:#}")).await;
                 }
                 let _ = out.send(ended_msg()).await;
@@ -298,29 +359,18 @@ async fn drive(
     }
 }
 
-/// Read one handshake packet, bounded by [`HANDSHAKE_TIMEOUT`].
-async fn read_timed(reader: &mut OwnedReadHalf, what: &str) -> Result<kbdesk_core::Packet> {
-    tokio::time::timeout(HANDSHAKE_TIMEOUT, read_packet(reader))
-        .await
-        .with_context(|| format!("timed out {what}"))?
-        .with_context(|| format!("failed {what}"))
-}
-
-/// Perform the viewer handshake against a host (direct) or through a relay.
-async fn start_session(
+/// Open the TCP/TLS leg and, in relay mode, send the single routing frame.
+/// Returns once paired — never speaks the session protocol itself.
+async fn start_pipe(
     server: &str,
     relay_id: Option<&str>,
-    password: &str,
-    monitor: u32,
-    quality: u8,
-    fps: u8,
-) -> Result<(OwnedReadHalf, OwnedWriteHalf)> {
-    let stream = tokio::time::timeout(HANDSHAKE_TIMEOUT, TcpStream::connect(server))
+    tls_client: &TlsClientOptions,
+) -> Result<(ReadHalf<MaybeTlsStream>, WriteHalf<MaybeTlsStream>)> {
+    let stream = tls::connect_timeout(server, tls_client, DIAL_TIMEOUT)
         .await
-        .with_context(|| format!("timed out connecting to {server}"))?
         .with_context(|| format!("connecting to {server} (is the relay/host running?)"))?;
     let _ = stream.set_nodelay(true);
-    let (mut reader, mut writer) = stream.into_split();
+    let (reader, mut writer) = tokio::io::split(stream);
 
     if let Some(id) = relay_id {
         write_packet(
@@ -333,182 +383,82 @@ async fn start_session(
         )
         .await?;
     }
-
-    write_packet(
-        &mut writer,
-        KIND_CONTROL,
-        &Control::Hello {
-            version: PROTOCOL_VERSION,
-            role: Role::Viewer,
-            id: String::new(),
-        }
-        .encode(),
-    )
-    .await?;
-
-    let packet = read_timed(&mut reader, "waiting for the host").await?;
-    match Control::decode(&packet.payload)? {
-        Control::Hello {
-            role: Role::Host, ..
-        } => {}
-        Control::Error(e) => bail!("peer refused: {e}"),
-        other => bail!("unexpected reply: {other:?}"),
-    }
-
-    write_packet(
-        &mut writer,
-        KIND_CONTROL,
-        &Control::Auth {
-            password: password.to_string(),
-        }
-        .encode(),
-    )
-    .await?;
-    let packet = read_timed(&mut reader, "waiting for authentication").await?;
-    match Control::decode(&packet.payload)? {
-        Control::AuthResult { ok: true, .. } => {}
-        Control::AuthResult { ok: false, reason } => bail!("authentication failed: {reason}"),
-        Control::Error(e) => bail!("peer refused: {e}"),
-        other => bail!("unexpected reply: {other:?}"),
-    }
-
-    write_packet(
-        &mut writer,
-        KIND_CONTROL,
-        &Control::StartStream {
-            monitor,
-            quality,
-            fps,
-        }
-        .encode(),
-    )
-    .await?;
-
     Ok((reader, writer))
 }
 
-/// Pump frames to the browser and input events to the host until either side
-/// ends, then close the host side cleanly.
-///
-/// The host->browser reader runs in its own task and pushes whole packets onto
-/// a channel. `read_packet` is not cancellation-safe, so it must never be
-/// raced directly inside `select!` — doing so would drop partly-read bytes
-/// whenever the browser sent input at the same moment a frame was arriving,
-/// corrupting the stream (symptom: "incoming frame too large").
-async fn session(
+/// Shovel raw chunks between the WebSocket and the host leg until either
+/// side ends. No parsing, no decryption, no dropping: chunk boundaries are
+/// meaningless to the framed, AEAD-protected protocol inside.
+async fn pipe(
     ws_rx: &mut SplitStream<WebSocket>,
     out: &mpsc::Sender<Message>,
-    reader: OwnedReadHalf,
-    mut writer: OwnedWriteHalf,
-    monitor: u32,
+    reader: ReadHalf<MaybeTlsStream>,
+    mut writer: WriteHalf<MaybeTlsStream>,
 ) -> Result<()> {
-    let (packet_tx, mut packet_rx) = mpsc::unbounded_channel::<Result<Packet>>();
+    // The reader runs in its own task and pushes chunks onto a *bounded*
+    // channel — awaiting send is what turns a slow browser into TCP
+    // back-pressure instead of dropped ciphertext.
+    let (chunk_tx, mut chunk_rx) = mpsc::channel::<Result<Vec<u8>>>(OUT_QUEUE);
     let reader_task = tokio::spawn(async move {
         let mut reader = reader;
+        let mut buf = vec![0u8; CHUNK];
         loop {
-            match read_packet(&mut reader).await {
-                Ok(packet) => {
-                    if packet_tx.send(Ok(packet)).is_err() {
+            match reader.read(&mut buf).await {
+                Ok(0) => break, // EOF: channel close ends the session
+                Ok(n) => {
+                    if chunk_tx.send(Ok(buf[..n].to_vec())).await.is_err() {
                         break;
                     }
                 }
                 Err(e) => {
-                    let _ = packet_tx.send(Err(e));
+                    let _ = chunk_tx.send(Err(e.into())).await;
                     break;
                 }
             }
         }
     });
 
-    let result = session_loop(ws_rx, out, &mut packet_rx, &mut writer, monitor).await;
+    let result = pipe_loop(ws_rx, out, &mut chunk_rx, &mut writer).await;
 
-    // Best-effort clean close: release held input, stop the stream. The host
-    // also releases input when the connection drops, so this is belt-and-braces.
-    let _ = write_packet(
-        &mut writer,
-        KIND_CONTROL,
-        &Control::Input(InputEvent::ReleaseAll).encode(),
-    )
-    .await;
-    let _ = write_packet(&mut writer, KIND_CONTROL, &Control::StopStream.encode()).await;
+    // Note: unlike the old translating bridge we cannot send a final
+    // ReleaseAll/StopStream — those frames must be AEAD-encrypted by the
+    // page (which sends them before disconnecting). The host also releases
+    // all input when this connection drops, so this remains safe.
+    let _ = writer.shutdown().await;
     reader_task.abort();
     result
 }
 
-async fn session_loop(
+async fn pipe_loop(
     ws_rx: &mut SplitStream<WebSocket>,
     out: &mpsc::Sender<Message>,
-    packet_rx: &mut mpsc::UnboundedReceiver<Result<Packet>>,
-    writer: &mut OwnedWriteHalf,
-    mut monitor: u32,
+    chunk_rx: &mut mpsc::Receiver<Result<Vec<u8>>>,
+    writer: &mut WriteHalf<MaybeTlsStream>,
 ) -> Result<()> {
     loop {
         tokio::select! {
-            incoming = packet_rx.recv() => {
-                let packet = match incoming {
-                    Some(Ok(packet)) => packet,
+            chunk = chunk_rx.recv() => {
+                match chunk {
+                    Some(Ok(bytes)) => {
+                        if out.send(Message::binary(bytes)).await.is_err() {
+                            return Ok(()); // browser gone
+                        }
+                    }
                     Some(Err(e)) => bail!("connection to the host was lost: {e:#}"),
-                    None => return Ok(()),
-                };
-                match packet.kind {
-                    KIND_VIDEO => {
-                        // Forward verbatim; the browser decodes the header.
-                        // Latest-frame-wins: drop, never queue, when behind.
-                        match out.try_send(Message::binary(packet.payload)) {
-                            Ok(()) => {}
-                            Err(mpsc::error::TrySendError::Full(_)) => {}
-                            Err(mpsc::error::TrySendError::Closed(_)) => return Ok(()),
-                        }
-                    }
-                    KIND_CONTROL => {
-                        match Control::decode(&packet.payload) {
-                            Ok(Control::Pong(t)) => {
-                                let msg = Message::text(
-                                    serde_json::json!({ "type": "pong", "t": t }).to_string(),
-                                );
-                                let _ = out.try_send(msg);
-                            }
-                            Ok(Control::Error(e)) => bail!("host error: {e}"),
-                            _ => {}
-                        }
-                    }
-                    _ => {}
+                    None => return Ok(()), // host closed the connection
                 }
             }
             message = ws_rx.next() => {
                 match message {
+                    Some(Ok(Message::Binary(data))) => {
+                        writer.write_all(&data).await?;
+                        writer.flush().await?;
+                    }
                     Some(Ok(Message::Text(text))) => {
+                        // The only text understood mid-session is "disconnect".
                         match serde_json::from_str::<BrowserMsg>(text.as_str()) {
-                            Ok(BrowserMsg::Input { event }) => {
-                                write_packet(writer, KIND_CONTROL, &Control::Input(event).encode()).await?;
-                            }
-                            Ok(BrowserMsg::Inputs { events }) => {
-                                for event in events {
-                                    write_packet(writer, KIND_CONTROL, &Control::Input(event).encode()).await?;
-                                }
-                            }
-                            Ok(BrowserMsg::Stream { monitor: m, quality, fps }) => {
-                                if let Some(m) = m {
-                                    monitor = m;
-                                }
-                                write_packet(
-                                    writer,
-                                    KIND_CONTROL,
-                                    &Control::StartStream {
-                                        monitor,
-                                        quality: quality.unwrap_or(70).clamp(1, 100),
-                                        fps: fps.unwrap_or(15).clamp(1, 60),
-                                    }
-                                    .encode(),
-                                )
-                                .await?;
-                            }
-                            Ok(BrowserMsg::Ping { t }) => {
-                                write_packet(writer, KIND_CONTROL, &Control::Ping(t).encode()).await?;
-                            }
                             Ok(BrowserMsg::Disconnect) => return Ok(()),
-                            Ok(BrowserMsg::Connect { .. }) => {}
-                            Err(e) => warn!("bad browser message: {e}"),
+                            _ => warn!("ignoring unexpected browser text message mid-session"),
                         }
                     }
                     Some(Ok(Message::Close(_))) | None => return Ok(()),
