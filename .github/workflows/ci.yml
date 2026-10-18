@@ -79,4 +79,12 @@ jobs:
       - run: >-
           cargo check --locked --target ${{ matrix.target }}
           -p kbdesk-core -p kbdesk-server -p kbdesk-web
-          -p kbdesk-host -p kbdesk-launcher
+          -p kbdesk-host -p kbdesk-launcher 2>&1 | tee -a ci.log
+      # TEMPORARY: see note in the build job.
+      - name: Post failure log as an issue
+        if: failure()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          { echo "Cross-check failure (${{ matrix.target }}) for ${GITHUB_SHA}:"; echo '```'; tail -n 300 ci.log 2>/dev/null; echo '```'; } > /tmp/body.md
+          gh issue create --title "ci-log ${GITHUB_SHA::8} ${{ matrix.target }}" --body-file /tmp/body.md || true
