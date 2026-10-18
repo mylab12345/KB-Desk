@@ -5,6 +5,13 @@ on:
   pull_request:
   workflow_dispatch:
 
+# TEMPORARY (dev from a sandbox that cannot reach the Actions log host):
+# lets the failure steps below post their own log as an issue. Removed
+# together with those steps once this work is green.
+permissions:
+  contents: read
+  issues: write
+
 jobs:
   build:
     name: build + test (ubuntu)
@@ -21,19 +28,25 @@ jobs:
           libxcb1-dev libxcb-render0-dev libxcb-shape0-dev
           libxcb-xfixes0-dev libxkbcommon-dev
 
+      # NOTE: `set -o pipefail` is essential — without it a failing cargo
+      # command piped into tee would report success.
       - name: Check whole workspace compiles
-        run: cargo check --workspace --locked
+        run: set -o pipefail; cargo check --workspace --locked 2>&1 | tee -a ci.log
 
       - name: Test (protocol, relay, web bridge, host, launcher)
         run: >-
-          cargo test --locked
+          set -o pipefail; cargo test --locked
           -p kbdesk-core -p kbdesk-server -p kbdesk-web
-          -p kbdesk-host -p kbdesk-launcher
+          -p kbdesk-host -p kbdesk-launcher 2>&1 | tee -a ci.log
+
+      - name: Browser crypto tests (pure-JS E2E implementation)
+        run: node tests/js/crypto.test.cjs 2>&1 | tee -a ci.log
 
       - name: Release build of the browser-control stack
         run: >-
-          cargo build --release --locked
+          set -o pipefail; cargo build --release --locked
           -p kbdesk-launcher -p kbdesk-server -p kbdesk-web -p kbdesk-host -p kbdesk-client
+          2>&1 | tee -a ci.log
 
       # End-to-end smoke test of the exact "control from a browser" path:
       # browser_client.py (WebSocket, like web/index.html) -> kbdesk-web ->
@@ -58,6 +71,15 @@ jobs:
           grep -q 'ReleaseAll' /tmp/fake_host_log.jsonl
           grep -q '"quality": 50' /tmp/fake_host_log.jsonl
           echo E2E-OK
+
+      # TEMPORARY: see the permissions note at the top of this file.
+      - name: Post failure log as an issue
+        if: failure()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          { echo "CI failure log tail for ${GITHUB_SHA}:"; echo '```'; tail -n 300 ci.log 2>/dev/null; echo '```'; } > /tmp/body.md
+          gh issue create --title "ci-log ${GITHUB_SHA::8}" --body-file /tmp/body.md || true
 
       - name: Upload binaries
         uses: actions/upload-artifact@v4
@@ -92,6 +114,14 @@ jobs:
       # claims check-level support, and the headless crates are the ones whose
       # cross-platform code (capture/input backends) actually matters here.
       - run: >-
-          cargo check --locked --target ${{ matrix.target }}
+          set -o pipefail; cargo check --locked --target ${{ matrix.target }}
           -p kbdesk-core -p kbdesk-server -p kbdesk-web
-          -p kbdesk-host -p kbdesk-launcher
+          -p kbdesk-host -p kbdesk-launcher 2>&1 | tee -a ci.log
+      # TEMPORARY: see the permissions note at the top of this file.
+      - name: Post failure log as an issue
+        if: failure()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          { echo "Cross-check failure (${{ matrix.target }}) for ${GITHUB_SHA}:"; echo '```'; tail -n 300 ci.log 2>/dev/null; echo '```'; } > /tmp/body.md
+          gh issue create --title "ci-log ${GITHUB_SHA::8} ${{ matrix.target }}" --body-file /tmp/body.md || true

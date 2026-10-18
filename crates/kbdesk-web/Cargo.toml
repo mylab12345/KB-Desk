@@ -19,4 +19,5 @@ tokio.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 axum = { version = "0.8", features = ["ws"] }
+axum-server.workspace = true
 futures-util = "0.3"

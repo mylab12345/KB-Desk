@@ -10,3 +10,14 @@ anyhow.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tokio = { workspace = true }
+# TLS transport (relay/host/client legs) — see src/tls.rs
+rustls.workspace = true
+tokio-rustls.workspace = true
+rustls-pemfile.workspace = true
+webpki-roots.workspace = true
+# End-to-end viewer<->host session crypto — see src/crypto.rs
+x25519-dalek.workspace = true
+chacha20poly1305.workspace = true
+hkdf.workspace = true
+sha2.workspace = true
+getrandom.workspace = true
