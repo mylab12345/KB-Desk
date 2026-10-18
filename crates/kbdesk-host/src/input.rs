@@ -169,6 +169,10 @@ fn to_key(spec: &KeySpec) -> Key {
             "Backspace" => Key::Backspace,
             "Space" | " " => Key::Space,
             "Delete" => Key::Delete,
+            // enigo only exposes some keys per-platform; cfg'd arms fall
+            // through to the harmless `other => Key::Other(0)` fallback
+            // on platforms without the key.
+            #[cfg(not(target_os = "macos"))]
             "Insert" => Key::Insert,
             "Home" => Key::Home,
             "End" => Key::End,
@@ -185,16 +189,41 @@ fn to_key(spec: &KeySpec) -> Key {
             "ControlLeft" => Key::LControl,
             "ControlRight" => Key::RControl,
             "Alt" => Key::Alt,
+            #[cfg(not(target_os = "macos"))]
             "AltLeft" => Key::LMenu,
+            #[cfg(target_os = "macos")]
+            "AltLeft" => Key::Option,
+            #[cfg(target_os = "windows")]
             "AltRight" | "AltGr" => Key::RMenu,
+            #[cfg(target_os = "macos")]
+            "AltRight" | "AltGr" => Key::ROption,
+            #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+            "AltRight" | "AltGr" => Key::Alt,
             "Meta" | "Super" | "OS" | "Windows" | "Win" => Key::Meta,
+            #[cfg(target_os = "windows")]
             "MetaLeft" | "SuperLeft" => Key::LWin,
+            #[cfg(target_os = "macos")]
+            "MetaLeft" | "SuperLeft" => Key::Command,
+            #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+            "MetaLeft" | "SuperLeft" => Key::Meta,
+            #[cfg(target_os = "windows")]
             "MetaRight" | "SuperRight" => Key::RWin,
+            #[cfg(target_os = "macos")]
+            "MetaRight" | "SuperRight" => Key::RCommand,
+            #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+            "MetaRight" | "SuperRight" => Key::Meta,
             "CapsLock" => Key::CapsLock,
+            #[cfg(not(target_os = "macos"))]
             "NumLock" => Key::Numlock,
+            #[cfg(all(unix, not(target_os = "macos")))]
             "ScrollLock" => Key::ScrollLock,
+            #[cfg(target_os = "windows")]
+            "ScrollLock" => Key::Scroll,
+            #[cfg(not(target_os = "macos"))]
             "PrintScreen" | "PrintScr" | "Snapshot" => Key::PrintScr,
+            #[cfg(not(target_os = "macos"))]
             "Pause" => Key::Pause,
+            #[cfg(target_os = "windows")]
             "ContextMenu" | "Menu" | "Apps" => Key::Apps,
             "F1" => Key::F1,
             "F2" => Key::F2,
@@ -216,9 +245,13 @@ fn to_key(spec: &KeySpec) -> Key {
             "F18" => Key::F18,
             "F19" => Key::F19,
             "F20" => Key::F20,
+            #[cfg(not(target_os = "macos"))]
             "F21" => Key::F21,
+            #[cfg(not(target_os = "macos"))]
             "F22" => Key::F22,
+            #[cfg(not(target_os = "macos"))]
             "F23" => Key::F23,
+            #[cfg(not(target_os = "macos"))]
             "F24" => Key::F24,
             "Numpad0" => Key::Numpad0,
             "Numpad1" => Key::Numpad1,
@@ -241,10 +274,15 @@ fn to_key(spec: &KeySpec) -> Key {
             "MediaPlayPause" => Key::MediaPlayPause,
             "MediaTrackNext" => Key::MediaNextTrack,
             "MediaTrackPrevious" => Key::MediaPrevTrack,
+            #[cfg(not(target_os = "macos"))]
             "MediaStop" => Key::MediaStop,
+            #[cfg(target_os = "windows")]
             "BrowserBack" => Key::BrowserBack,
+            #[cfg(target_os = "windows")]
             "BrowserForward" => Key::BrowserForward,
+            #[cfg(target_os = "windows")]
             "BrowserRefresh" => Key::BrowserRefresh,
+            #[cfg(target_os = "windows")]
             "BrowserHome" => Key::BrowserHome,
             other => single_char(other).unwrap_or(Key::Other(0)),
         },

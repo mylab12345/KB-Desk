@@ -44,6 +44,8 @@ def main():
     assigned = json.loads(payload)
     log("assigned", assigned)
 
+    # Parked at the relay now: a viewer may take a while to arrive.
+    s.settimeout(120)
     # Viewer hello (after pairing through relay)
     kind, payload = recv_packet(s)
     log("viewer-hello", json.loads(payload))

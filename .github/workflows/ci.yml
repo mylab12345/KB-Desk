@@ -18,18 +18,20 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
 
+      # NOTE: `set -o pipefail` is essential — without it a failing cargo
+      # command piped into tee would report success.
       - name: Check whole workspace compiles
-        run: cargo check --workspace --locked 2>&1 | tee -a ci.log
+        run: set -o pipefail; cargo check --workspace --locked 2>&1 | tee -a ci.log
 
       - name: Test (protocol, relay, web bridge, host, launcher)
         run: >-
-          cargo test --locked
+          set -o pipefail; cargo test --locked
           -p kbdesk-core -p kbdesk-server -p kbdesk-web
           -p kbdesk-host -p kbdesk-launcher 2>&1 | tee -a ci.log
 
       - name: Release build of the browser-control stack
         run: >-
-          cargo build --release --locked
+          set -o pipefail; cargo build --release --locked
           -p kbdesk-launcher -p kbdesk-server -p kbdesk-web -p kbdesk-host -p kbdesk-client
           2>&1 | tee -a ci.log
 
@@ -41,6 +43,7 @@ jobs:
           set -x
           exec > >(tee -a ci.log) 2>&1
           ./target/release/kbdesk --help | grep -q serve
+          test -x ./target/release/kbdesk-server && test -x ./target/release/kbdesk-web
           pip install --quiet websockets
           ./target/release/kbdesk-server --bind 127.0.0.1 --port 21118 &
           ./target/release/kbdesk-web --listen 127.0.0.1:8080 --relay 127.0.0.1:21118 &
@@ -100,7 +103,7 @@ jobs:
       # claims check-level support, and the headless crates are the ones whose
       # cross-platform code (capture/input backends) actually matters here.
       - run: >-
-          cargo check --locked --target ${{ matrix.target }}
+          set -o pipefail; cargo check --locked --target ${{ matrix.target }}
           -p kbdesk-core -p kbdesk-server -p kbdesk-web
           -p kbdesk-host -p kbdesk-launcher 2>&1 | tee -a ci.log
       # TEMPORARY: see note in the build job.
