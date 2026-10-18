@@ -13,7 +13,7 @@ mod input;
 use anyhow::{bail, Context, Result};
 use clap::Parser;
 use kbdesk_core::crypto;
-use kbdesk_core::tls::{self, MaybeTlsStream, TlsClientOptions, TlsServerOptions};
+use kbdesk_core::tls::{self, MaybeTlsStream, TlsAcceptor, TlsClientOptions, TlsServerOptions};
 use kbdesk_core::{
     encode_video, read_packet, read_secure_packet, write_packet, write_secure_packet, Control,
     InputEvent, Role, VideoFrame, DEFAULT_PORT, KIND_CONTROL, KIND_VIDEO, PROTOCOL_VERSION,
@@ -69,6 +69,33 @@ struct Args {
     /// Monitor index to capture (0 = primary).
     #[arg(long, default_value_t = 0)]
     monitor: u8,
+
+    /// PEM certificate chain for --listen TLS. Env: KB_DESK_TLS_CERT.
+    #[arg(long, env = "KB_DESK_TLS_CERT")]
+    tls_cert: Option<PathBuf>,
+
+    /// PEM private key for --tls-cert. Env: KB_DESK_TLS_KEY.
+    #[arg(long, env = "KB_DESK_TLS_KEY")]
+    tls_key: Option<PathBuf>,
+
+    /// PEM CA certificate(s) to trust when verifying the relay.
+    /// Env: KB_DESK_TLS_CA.
+    #[arg(long, env = "KB_DESK_TLS_CA")]
+    tls_ca: Option<PathBuf>,
+
+    /// Expected name in the relay's certificate (default: relay host).
+    /// Env: KB_DESK_TLS_SERVER_NAME.
+    #[arg(long, env = "KB_DESK_TLS_SERVER_NAME")]
+    tls_server_name: Option<String>,
+
+    /// Accept any relay certificate. Local development ONLY.
+    #[arg(long)]
+    tls_insecure: bool,
+
+    /// Disable transport TLS entirely. Local development ONLY — the
+    /// viewer<->host session stays end-to-end encrypted regardless.
+    #[arg(long)]
+    allow_plaintext: bool,
 }
 
 #[derive(Clone)]
@@ -78,6 +105,8 @@ struct SessionCfg {
     fps: u8,
     quality: u8,
     monitor: u8,
+    /// TLS settings for the outbound relay connection.
+    relay_tls: TlsClientOptions,
 }
 
 /// Session-wide state shared with the capture thread.

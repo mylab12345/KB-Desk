@@ -135,10 +135,11 @@ async fn session(
     fps: u8,
 ) -> Result<()> {
     set_status(shared, &format!("connecting to {addr}…"), false);
-    let stream = TcpStream::connect(addr)
+    let stream = tls::connect(addr, &tls_options_from_env())
         .await
         .with_context(|| format!("connecting to {addr}"))?;
-    let (mut reader, mut writer) = stream.into_split();
+    let _ = stream.set_nodelay(true);
+    let (mut reader, mut writer) = tokio::io::split(stream);
 
     // Relay: ask to be paired with a host id before the end-to-end handshake.
     if let Some(id) = &relay_id {
@@ -150,45 +151,19 @@ async fn session(
         .await?;
     }
 
-    // End-to-end handshake.
-    write_packet(
-        &mut writer,
-        KIND_CONTROL,
-        &Control::Hello {
-            version: PROTOCOL_VERSION,
-            role: Role::Viewer,
-            id: String::new(),
-        }
-        .encode(),
-    )
-    .await?;
+    // End-to-end handshake: ephemeral X25519 + password-bound key
+    // confirmation. Mutual: a wrong password (or an impersonating relay
+    // endpoint) is detected here, before any input is sent.
+    set_status(shared, "paired; establishing encrypted session…", false);
+    let (host_id, session) = crypto::viewer_handshake(&mut reader, &mut writer, &password)
+        .await
+        .context("encrypted session handshake")?;
+    let mut rx_cipher = session.recv;
+    let mut tx_cipher = session.send;
 
-    let packet = read_packet(&mut reader).await.context("waiting for host")?;
-    match Control::decode(&packet.payload)? {
-        Control::Hello {
-            role: Role::Host,
-            id,
-            ..
-        } => set_status(shared, &format!("connected to host {id}; authenticating…"), false),
-        Control::Error(e) => bail!("peer refused: {e}"),
-        other => bail!("unexpected reply: {other:?}"),
-    }
-
-    write_packet(
+    write_secure_packet(
         &mut writer,
-        KIND_CONTROL,
-        &Control::Auth { password }.encode(),
-    )
-    .await?;
-    let packet = read_packet(&mut reader).await.context("waiting for auth")?;
-    match Control::decode(&packet.payload)? {
-        Control::AuthResult { ok: true, .. } => {}
-        Control::AuthResult { ok: false, reason } => bail!("authentication failed: {reason}"),
-        other => bail!("unexpected reply: {other:?}"),
-    }
-
-    write_packet(
-        &mut writer,
+        &mut tx_cipher,
         KIND_CONTROL,
         &Control::StartStream {
             monitor,
@@ -198,7 +173,11 @@ async fn session(
         .encode(),
     )
     .await?;
-    set_status(shared, &format!("connected to {addr}"), true);
+    set_status(
+        shared,
+        &format!("connected to host {host_id} — TLS + end-to-end encrypted 🔒"),
+        true,
+    );
 
     // Read frames in a dedicated task: `read_packet` is not cancellation-safe,
     // so it must not be raced against outgoing input inside `select!`.
@@ -206,7 +185,7 @@ async fn session(
     tokio::spawn(async move {
         let mut reader = reader;
         loop {
-            match read_packet(&mut reader).await {
+            match read_secure_packet(&mut reader, &mut rx_cipher).await {
                 Ok(packet) => {
                     if packet_tx.send(Ok(packet)).is_err() {
                         break;

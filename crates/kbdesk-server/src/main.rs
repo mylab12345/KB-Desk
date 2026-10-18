@@ -194,7 +194,7 @@ async fn reap_dead_hosts(registry: Registry) {
     }
 }
 
-async fn handle_conn(mut stream: TcpStream, registry: Registry, peer: SocketAddr) -> Result<()> {
+async fn handle_conn(mut stream: MaybeTlsStream, registry: Registry, peer: SocketAddr) -> Result<()> {
     let packet = tokio::time::timeout(FIRST_FRAME_TIMEOUT, read_packet(&mut stream))
         .await
         .with_context(|| format!("timed out waiting for first frame from {peer}"))?

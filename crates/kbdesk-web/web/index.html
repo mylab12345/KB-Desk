@@ -54,7 +54,7 @@
 <body>
 <div id="app">
   <header>
-    <h1 id="title">KB-Desk <span>· web viewer — control a machine from this browser</span></h1>
+    <h1 id="title">KB-Desk <span>· web viewer — control a machine from this browser · 🔒 end-to-end encrypted</span></h1>
 
     <form class="row" id="formRow" autocomplete="off">
       <label for="id">ID</label>
@@ -159,10 +159,144 @@
   let statsTimer = 0, pingTimer = 0, drawnInWindow = 0, droppedTotal = 0, latencyMs = null;
 
   const setStatus = (msg, cls = "") => { statusEl.textContent = msg; statusEl.className = cls; };
-  const send = (obj) => { if (ws && wsOpen) ws.send(JSON.stringify(obj)); };
   const viewOnly = () => $("viewOnly").checked;
-  const sendInput = (event) => { if (live && !viewOnly()) send({ type: "input", event }); };
+
+  // ---------------- encrypted session (protocol v2 runs in this page) ----------------
+  // The WebSocket bridge is a blind byte pipe: raw KB-Desk frames arrive in
+  // arbitrary chunks, are reassembled here, and — after this page performs
+  // the X25519 + password-bound key exchange with the host — every frame is
+  // AEAD-encrypted. The bridge and relay only forward ciphertext.
+  const K = window.KBCrypto;
+  const te = new TextEncoder(), td = new TextDecoder();
+  const KIND_CONTROL = 1, KIND_VIDEO = 2;
+  let rxBuf = new Uint8Array(0);            // bytes not yet framed
+  let hsState = "idle";                     // idle|waitHello|waitReply|waitAuth|live
+  let hsWatchdog = 0;
+  let ephSecret = null, myPub = null, myNonce = null, hostId = "";
+  let txCipher = null, rxCipher = null;
+  let pendingCreds = null;                  // {password} — held in memory only
+
+  function sendWsText(obj) { if (ws && wsOpen) ws.send(JSON.stringify(obj)); } // bridge commands only
+  function sendFrame(kind, payload) {
+    if (!ws || !wsOpen) return;
+    const msg = new Uint8Array(5 + payload.length);
+    new DataView(msg.buffer).setUint32(0, 1 + payload.length);
+    msg[4] = kind; msg.set(payload, 5);
+    ws.send(msg);
+  }
+  function sendControlPlain(obj) { sendFrame(KIND_CONTROL, te.encode(JSON.stringify(obj))); }
+  function sendControlSecure(obj) {
+    if (!txCipher) return;
+    sendFrame(KIND_CONTROL, txCipher.encrypt(KIND_CONTROL, te.encode(JSON.stringify(obj))));
+  }
+  const send = sendWsText; // bridge-level (dial/disconnect) — never session data
+  const sendInput = (event) => { if (live && !viewOnly()) sendControlSecure({ Input: event }); };
   const sendKey = (key, down) => sendInput({ Key: { key, down } });
+
+  function resetCrypto() {
+    hsState = "idle"; txCipher = null; rxCipher = null;
+    ephSecret = null; rxBuf = new Uint8Array(0);
+    clearTimeout(hsWatchdog); hsWatchdog = 0;
+  }
+
+  function sessionError(text) {
+    const wasLive = live;
+    resetCrypto(); exitLive();
+    setStatus(text, "err");
+    send({ type: "disconnect" });
+    if (wantConnected && $("reconnect").checked && shouldRetry(text, wasLive)) scheduleReconnect();
+  }
+
+  function beginHandshake() {
+    if (!pendingCreds) return;
+    if (!K || !K.hasSecureRandom()) {
+      sessionError("Secure random key generation is unavailable in this browser context — open this page over HTTPS (or http://localhost) and try again.");
+      return;
+    }
+    try {
+      const kp = K.generateKeyPair();
+      ephSecret = kp.secret; myPub = kp.publicKey; myNonce = K.randomBytes(16);
+      rxBuf = new Uint8Array(0); hsState = "waitHello";
+      clearTimeout(hsWatchdog);
+      hsWatchdog = setTimeout(() => sessionError("timed out waiting for the host to complete the encrypted handshake"), 20000);
+      sendControlPlain({ Hello: { version: 2, role: "Viewer", id: "" } });
+    } catch (e) { sessionError(e.message); }
+  }
+
+  function handleFrame(kind, payload) {
+    if (hsState === "live") {
+      const plain = rxCipher.decrypt(kind, payload);
+      if (kind === KIND_VIDEO) onFrame(plain);
+      else if (kind === KIND_CONTROL) handleControl(JSON.parse(td.decode(plain)));
+      return;
+    }
+    if (kind !== KIND_CONTROL) return;
+    if (hsState === "waitAuth") { // first encrypted frame: AuthResult
+      let plain;
+      try { plain = rxCipher.decrypt(kind, payload); }
+      catch (e) {
+        try {
+          const o = JSON.parse(td.decode(payload));
+          if (o && o.Error) { sessionError("host rejected the session: " + o.Error); return; }
+        } catch (_) { /* not plaintext either */ }
+        throw e;
+      }
+      const msg = JSON.parse(td.decode(plain));
+      if (msg.AuthResult && msg.AuthResult.ok) {
+        hsState = "live"; clearTimeout(hsWatchdog); hsWatchdog = 0;
+        sendControlSecure({ StartStream: { monitor: lastParams.monitor, quality: lastParams.quality, fps: lastParams.fps } });
+        setStatus("Connected — end-to-end encrypted 🔒", "ok");
+        enterLive();
+      } else {
+        sessionError("Authentication failed: " + (msg.AuthResult ? msg.AuthResult.reason : "unexpected reply"));
+      }
+      return;
+    }
+    const msg = JSON.parse(td.decode(payload));
+    if (msg.Hello && hsState === "waitHello") {
+      if (msg.Hello.version !== 2 || msg.Hello.role !== "Host") {
+        sessionError("The host does not speak protocol v2 (mandatory encryption). Upgrade KB-Desk on the host.");
+        return;
+      }
+      hostId = msg.Hello.id || "";
+      sendControlPlain({ KeyExchangeInit: { pubkey: K.hexEncode(myPub), nonce: K.hexEncode(myNonce) } });
+      hsState = "waitReply";
+    } else if (msg.KeyExchangeReply && hsState === "waitReply") {
+      const hostPub = K.hexDecode(msg.KeyExchangeReply.pubkey);
+      const hostNonce = K.hexDecode(msg.KeyExchangeReply.nonce);
+      const s = K.deriveSession(ephSecret, hostPub, myPub, hostPub, myNonce, hostNonce, hostId, pendingCreds.password, true);
+      if (!K.ctEq(K.hexDecode(msg.KeyExchangeReply.confirm), s.peerConfirm)) {
+        sessionError("Host authentication failed — wrong password, or someone is impersonating the host. Nothing was sent.");
+        return;
+      }
+      txCipher = s.send; rxCipher = s.recv;
+      sendControlPlain({ KeyExchangeFinish: { confirm: K.hexEncode(s.myConfirm) } });
+      hsState = "waitAuth";
+    } else if (msg.Error) {
+      sessionError(String(msg.Error));
+    }
+  }
+
+  function handleControl(msg) {
+    if (msg.Pong !== undefined) latencyMs = Math.max(0, Date.now() - msg.Pong);
+    else if (msg.Error) setStatus("Host error: " + msg.Error, "err");
+  }
+
+  function onPipeBytes(u8) {
+    const merged = new Uint8Array(rxBuf.length + u8.length);
+    merged.set(rxBuf); merged.set(u8, rxBuf.length); rxBuf = merged;
+    for (;;) {
+      if (rxBuf.length < 4) return;
+      const len = new DataView(rxBuf.buffer, rxBuf.byteOffset, 4).getUint32(0);
+      if (len < 1 || len > 64 * 1024 * 1024) { sessionError("Protocol error (invalid frame) — disconnected."); return; }
+      if (rxBuf.length < 4 + len) return;
+      const kind = rxBuf[4];
+      const payload = rxBuf.slice(5, 4 + len);
+      rxBuf = rxBuf.slice(4 + len);
+      try { handleFrame(kind, payload); }
+      catch (e) { sessionError("Encrypted session error: " + e.message + " — disconnected."); return; }
+    }
+  }
 
   // ---------------- config / form restore ----------------
   fetch(base + "/config").then(r => r.json()).then(cfg => {
@@ -195,10 +329,9 @@
       if (typeof ev.data === "string") {
         let m; try { m = JSON.parse(ev.data); } catch { return; }
         if (m.type === "status") {
-          setStatus(m.message, "ok"); liveText.textContent = m.message;
-          if (m.message.indexOf("connected") === 0) enterLive();
-        } else if (m.type === "pong") {
-          latencyMs = Math.max(0, Date.now() - m.t);
+          setStatus(m.message); if (!live) liveText.textContent = m.message;
+        } else if (m.type === "ready") {
+          beginHandshake();
         } else if (m.type === "error") {
           setStatus(m.message, "err");
           const wasLive = live; exitLive();
@@ -209,7 +342,7 @@
           if (wantConnected && $("reconnect").checked && wasLive) scheduleReconnect();
         }
       } else {
-        onFrame(new Uint8Array(ev.data));
+        onPipeBytes(new Uint8Array(ev.data));
       }
     };
     ws.onclose = () => {
@@ -255,8 +388,11 @@
     localStorage.setItem("kbdesk.fps", $("fps").value);
 
     wantConnected = true; retryCount = 0;
+    // The password is never sent to the bridge — keep it in memory only for
+    // the end-to-end key exchange inside this page (and out of any log).
+    pendingCreds = { password };
     lastParams = {
-      type: "connect", id: id || null, address: address || null, password,
+      type: "dial", id: id || null, address: address || null,
       monitor: parseInt($("monitor").value, 10) || 0,
       quality: parseInt($("quality").value, 10) || 70,
       fps: parseInt($("fps").value, 10) || 15,
@@ -269,6 +405,7 @@
     wantConnected = false; retryCount = 0;
     if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = 0; }
     releaseAll();
+    sendControlSecure("StopStream");
     send({ type: "disconnect" });
     if (ws) ws.close();
     exitLive(); setStatus("Disconnected.");
@@ -289,12 +426,13 @@
         (droppedTotal ? " · " + droppedTotal + " dropped" : "");
       drawnInWindow = 0;
     }, 1000);
-    const ping = () => send({ type: "ping", t: Date.now() });
+    const ping = () => sendControlSecure({ Ping: Date.now() });
     ping(); pingTimer = setInterval(ping, 2500);
   }
 
   function exitLive() {
     if (live) releaseAll();
+    resetCrypto();
     live = false; latencyMs = null;
     document.body.classList.remove("live", "paste-open", "keybar-open");
     hint.style.display = "block";
@@ -507,7 +645,7 @@
     pressed.clear(); mouseDown.clear(); pendingMove = null;
     touches.forEach((r) => clearTimeout(r.longPress)); touches.clear(); lastTwoFingerY = null;
     document.querySelectorAll("#keybar button.active").forEach((b) => b.classList.remove("active"));
-    if (ws && wsOpen) send({ type: "input", event: "ReleaseAll" });
+    if (txCipher) sendControlSecure({ Input: "ReleaseAll" });
   }
   window.addEventListener("blur", () => { if (live) releaseAll(); });
   document.addEventListener("visibilitychange", () => { if (live && document.hidden) releaseAll(); });
@@ -515,10 +653,8 @@
   // ---------------- key combinations + extra keys ----------------
   function combo(keys) {
     if (!live || viewOnly()) return;
-    const events = [];
-    keys.forEach((k) => events.push({ Key: { key: { Named: k }, down: true } }));
-    keys.slice().reverse().forEach((k) => events.push({ Key: { key: { Named: k }, down: false } }));
-    send({ type: "inputs", events });
+    keys.forEach((k) => sendInput({ Key: { key: { Named: k }, down: true } }));
+    keys.slice().reverse().forEach((k) => sendInput({ Key: { key: { Named: k }, down: false } }));
   }
   const COMBOS = {
     ctrlaltdel: ["ControlLeft", "AltLeft", "Delete"],
@@ -535,12 +671,12 @@
     if (!v) return;
     if (COMBO_CHAR[v]) {
       if (!live || viewOnly()) return;
-      send({ type: "inputs", events: [
+      [
         { Key: { key: { Named: "MetaLeft" }, down: true } },
         { Key: { key: { Char: COMBO_CHAR[v] }, down: true } },
         { Key: { key: { Char: COMBO_CHAR[v] }, down: false } },
         { Key: { key: { Named: "MetaLeft" }, down: false } },
-      ] });
+      ].forEach((e) => sendInput(e));
     } else if (COMBOS[v]) combo(COMBOS[v]);
     canvas.focus();
   });
@@ -597,12 +733,11 @@
     clearTimeout(streamTimer);
     streamTimer = setTimeout(() => {
       if (!live) return;
-      send({
-        type: "stream",
+      sendControlSecure({ StartStream: {
         monitor: lastParams ? lastParams.monitor : 0,
         quality: parseInt($("liveQuality").value, 10) || 70,
         fps: parseInt($("liveFps").value, 10) || 15,
-      });
+      } });
     }, 250);
   }
   $("liveQuality").addEventListener("input", pushStream);
