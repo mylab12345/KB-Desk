@@ -30,7 +30,7 @@ image = { version = "0.25", default-features = false, features = ["jpeg"] }
 # ring only: avoid the aws-lc-rs provider (cmake/nasm build weight, and a
 # second process-wide crypto provider). Every binary installs the ring
 # provider explicitly via kbdesk_core::tls::ensure_crypto_provider().
-rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging", "dangerous_configuration"] }
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12", "logging"] }
 rustls-pemfile = "2"
 webpki-roots = "1"

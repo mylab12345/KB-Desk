@@ -8,7 +8,10 @@ use anyhow::{bail, Result};
 use serde::{Deserialize, Serialize};
 
 /// Wire-protocol version. Bump on breaking changes.
-pub const PROTOCOL_VERSION: u16 = 1;
+/// v2 = mandatory end-to-end session encryption (see `crate::crypto`):
+/// peers must complete the X25519 key exchange and encrypt every session
+/// frame. v1 peers are rejected outright — upgrade all components together.
+pub const PROTOCOL_VERSION: u16 = 2;
 
 /// Which side of a session a peer claims to be.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -33,9 +36,22 @@ pub enum Control {
     AssignedId(String),
     /// Viewer → relay: ask to be connected to a given host identity.
     Connect { target: String },
-    /// Viewer → host: authentication attempt.
+    /// Viewer → host: start the v2 key exchange (hex-encoded fields).
+    /// Sent after `Hello`; establishes the encrypted session (see
+    /// `crate::crypto`). Carries only public material.
+    KeyExchangeInit { pubkey: String, nonce: String },
+    /// Host → viewer: key-exchange reply with the host's key-confirmation
+    /// value, proving knowledge of the session password + shared secret.
+    KeyExchangeReply { pubkey: String, nonce: String, confirm: String },
+    /// Viewer → host: the viewer's key-confirmation value. After this point
+    /// every frame in both directions is AEAD-encrypted.
+    KeyExchangeFinish { confirm: String },
+    /// Viewer → host: authentication attempt. **Protocol v1 only** — v2
+    /// authenticates inside the key exchange and never sends a password.
+    /// Kept so old payloads still decode to a clear version error.
     Auth { password: String },
-    /// Host → viewer: authentication result.
+    /// Host → viewer: authentication result. In v2 this is the first
+    /// *encrypted* frame of the session.
     AuthResult { ok: bool, reason: String },
     /// Viewer → host: begin sending screen frames.
     StartStream {
