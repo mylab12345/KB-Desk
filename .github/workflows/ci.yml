@@ -1,0 +1,66 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: build + test (ubuntu)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Check whole workspace compiles
+        run: cargo check --workspace --locked
+
+      - name: Test (protocol, relay, web bridge, host, launcher)
+        run: >-
+          cargo test --locked
+          -p kbdesk-core -p kbdesk-server -p kbdesk-web
+          -p kbdesk-host -p kbdesk-launcher
+
+      - name: Release build of the browser-control stack
+        run: >-
+          cargo build --release --locked
+          -p kbdesk-launcher -p kbdesk-server -p kbdesk-web -p kbdesk-host -p kbdesk-client
+
+      - name: Upload binaries
+        uses: actions/upload-artifact@v4
+        with:
+          name: kbdesk-linux-x86_64
+          path: |
+            target/release/kbdesk
+            target/release/kbdesk-server
+            target/release/kbdesk-web
+            target/release/kbdesk-host
+            target/release/kbdesk-client
+          if-no-files-found: error
+
+  cross-check:
+    name: cargo check (${{ matrix.target }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [x86_64-pc-windows-gnu, x86_64-apple-darwin]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+      - if: matrix.target == 'x86_64-pc-windows-gnu'
+        run: sudo apt-get update && sudo apt-get install -y gcc-mingw-w64-x86-64
+      # egui/eframe cross-compilation needs target GUI SDKs; the README only
+      # claims check-level support, and the headless crates are the ones whose
+      # cross-platform code (capture/input backends) actually matters here.
+      - run: >-
+          cargo check --locked --target ${{ matrix.target }}
+          -p kbdesk-core -p kbdesk-server -p kbdesk-web
+          -p kbdesk-host -p kbdesk-launcher

@@ -24,8 +24,8 @@ pub mod protocol;
 
 pub use frame::{read_packet, write_packet, Packet, KIND_CONTROL, KIND_VIDEO, MAX_MESSAGE};
 pub use protocol::{
-    decode_video, encode_video, generate_id, Control, InputEvent, KeySpec, MouseButton, Role,
-    VideoFrame, PROTOCOL_VERSION,
+    decode_video, encode_video, generate_id, normalize_id, Control, InputEvent, KeySpec,
+    MouseButton, Role, VideoFrame, PROTOCOL_VERSION,
 };
 
 /// Default TCP port used by the relay, host listeners, and clients.

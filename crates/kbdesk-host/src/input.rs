@@ -4,10 +4,16 @@
 //! Wayland, Windows, macOS). Injection runs on a dedicated OS thread because
 //! the backend handle is not safe to share across the async runtime, and input
 //! events arrive over a standard channel.
+//!
+//! The injector tracks every key and mouse button it is holding down, so a
+//! [`InputEvent::ReleaseAll`] (sent by viewers on focus loss/disconnect), or
+//! simply the end of the session, can put the controlled machine back into a
+//! clean state instead of leaving a modifier or button stuck forever.
 
 use anyhow::Result;
 use enigo::{Axis, Button, Coordinate, Direction, Enigo, Key, Keyboard, Mouse, Settings};
 use kbdesk_core::{InputEvent, KeySpec, MouseButton};
+use std::collections::HashSet;
 use std::sync::mpsc::{channel, Sender};
 use std::thread;
 use tracing::{info, warn};
@@ -39,11 +45,14 @@ pub fn spawn() -> InputHandle {
                 }
             };
             info!("input injector ready");
+            let mut held = Held::default();
             while let Ok(event) = rx.recv() {
-                if let Err(e) = apply(&mut enigo, event) {
+                if let Err(e) = apply(&mut enigo, &mut held, event) {
                     warn!("input injection error: {e}");
                 }
             }
+            // Session ended (all senders dropped): never leave keys stuck.
+            held.release_all(&mut enigo);
             info!("input injector stopped");
         });
     if let Err(e) = spawn_result {
@@ -52,23 +61,69 @@ pub fn spawn() -> InputHandle {
     InputHandle { tx }
 }
 
-fn apply(enigo: &mut Enigo, event: InputEvent) -> Result<()> {
+/// Keys/buttons this injector is currently holding down on the host.
+#[derive(Default)]
+struct Held {
+    keys: HashSet<Key>,
+    /// The keys in press order, so they can be released in reverse.
+    key_list: Vec<Key>,
+    buttons: HashSet<MouseButton>,
+}
+
+impl Held {
+    fn press_key(&mut self, key: Key) {
+        if self.keys.insert(key) {
+            self.key_list.push(key);
+        }
+    }
+
+    fn release_key(&mut self, key: &Key) {
+        if self.keys.remove(key) {
+            self.key_list.retain(|k| k != key);
+        }
+    }
+
+    /// Release everything (buttons first, keys in reverse press order).
+    fn release_all(&mut self, enigo: &mut Enigo) {
+        if self.key_list.is_empty() && self.buttons.is_empty() {
+            return;
+        }
+        for button in self.buttons.drain() {
+            let _ = enigo.button(to_button(button), Direction::Release);
+        }
+        for key in self.key_list.drain(..).rev() {
+            let _ = enigo.key(key, Direction::Release);
+        }
+        self.keys.clear();
+        tracing::debug!("released all held input");
+    }
+}
+
+fn to_button(button: MouseButton) -> Button {
+    match button {
+        MouseButton::Left => Button::Left,
+        MouseButton::Middle => Button::Middle,
+        MouseButton::Right => Button::Right,
+        MouseButton::Back => Button::Back,
+        MouseButton::Forward => Button::Forward,
+    }
+}
+
+fn apply(enigo: &mut Enigo, held: &mut Held, event: InputEvent) -> Result<()> {
     match event {
         InputEvent::MouseMove { x, y } => enigo.move_mouse(x, y, Coordinate::Abs)?,
         InputEvent::MouseButton { button, down } => {
-            let button = match button {
-                MouseButton::Left => Button::Left,
-                MouseButton::Middle => Button::Middle,
-                MouseButton::Right => Button::Right,
-                MouseButton::Back => Button::Back,
-                MouseButton::Forward => Button::Forward,
-            };
+            if down {
+                held.buttons.insert(button);
+            } else {
+                held.buttons.remove(&button);
+            }
             let direction = if down {
                 Direction::Press
             } else {
                 Direction::Release
             };
-            enigo.button(button, direction)?;
+            enigo.button(to_button(button), direction)?;
         }
         InputEvent::MouseScroll { dx, dy } => {
             if dy != 0 {
@@ -79,48 +134,68 @@ fn apply(enigo: &mut Enigo, event: InputEvent) -> Result<()> {
             }
         }
         InputEvent::Key { key, down } => {
-            let direction = if down {
-                Direction::Press
+            let key = to_key(&key);
+            if down {
+                held.press_key(key);
+                enigo.key(key, Direction::Press)?;
             } else {
-                Direction::Release
-            };
-            enigo.key(to_key(&key), direction)?;
+                held.release_key(&key);
+                enigo.key(key, Direction::Release)?;
+            }
         }
+        InputEvent::Text(text) => {
+            // Type the string as-is (used by "paste text" in the web viewer).
+            if !text.is_empty() {
+                enigo.text(&text)?;
+            }
+        }
+        InputEvent::ReleaseAll => held.release_all(enigo),
     }
     Ok(())
 }
 
 /// Map a protocol [`KeySpec`] to an `enigo` key.
 ///
-/// Only keys that exist on every supported platform are named here; anything
-/// else falls back to a Unicode character so typing still works.
+/// Named keys follow the browser's `KeyboardEvent.code`/`key` vocabulary
+/// (`"ArrowUp"`, `"ControlLeft"`, `"NumpadAdd"`, …) because the web viewer is
+/// the richest sender; the native client's names are kept as aliases.
 fn to_key(spec: &KeySpec) -> Key {
     match spec {
         KeySpec::Char(c) => Key::Unicode(*c),
         KeySpec::Named(name) => match name.as_str() {
-            "Enter" | "Return" => Key::Return,
+            "Enter" | "Return" | "NumpadEnter" => Key::Return,
             "Tab" => Key::Tab,
-            "Escape" => Key::Escape,
+            "Escape" | "Esc" => Key::Escape,
             "Backspace" => Key::Backspace,
-            "Space" => Key::Space,
+            "Space" | " " => Key::Space,
             "Delete" => Key::Delete,
+            "Insert" => Key::Insert,
             "Home" => Key::Home,
             "End" => Key::End,
             "PageUp" => Key::PageUp,
             "PageDown" => Key::PageDown,
-            "ArrowUp" => Key::UpArrow,
-            "ArrowDown" => Key::DownArrow,
-            "ArrowLeft" => Key::LeftArrow,
-            "ArrowRight" => Key::RightArrow,
+            "ArrowUp" | "Up" => Key::UpArrow,
+            "ArrowDown" | "Down" => Key::DownArrow,
+            "ArrowLeft" | "Left" => Key::LeftArrow,
+            "ArrowRight" | "Right" => Key::RightArrow,
             "Shift" => Key::Shift,
             "ShiftLeft" => Key::LShift,
             "ShiftRight" => Key::RShift,
-            "Control" => Key::Control,
+            "Control" | "Ctrl" => Key::Control,
             "ControlLeft" => Key::LControl,
             "ControlRight" => Key::RControl,
             "Alt" => Key::Alt,
-            "Meta" | "Super" => Key::Meta,
+            "AltLeft" => Key::LMenu,
+            "AltRight" | "AltGr" => Key::RMenu,
+            "Meta" | "Super" | "OS" | "Windows" | "Win" => Key::Meta,
+            "MetaLeft" | "SuperLeft" => Key::LWin,
+            "MetaRight" | "SuperRight" => Key::RWin,
             "CapsLock" => Key::CapsLock,
+            "NumLock" => Key::Numlock,
+            "ScrollLock" => Key::ScrollLock,
+            "PrintScreen" | "PrintScr" | "Snapshot" => Key::PrintScr,
+            "Pause" => Key::Pause,
+            "ContextMenu" | "Menu" | "Apps" => Key::Apps,
             "F1" => Key::F1,
             "F2" => Key::F2,
             "F3" => Key::F3,
@@ -133,6 +208,44 @@ fn to_key(spec: &KeySpec) -> Key {
             "F10" => Key::F10,
             "F11" => Key::F11,
             "F12" => Key::F12,
+            "F13" => Key::F13,
+            "F14" => Key::F14,
+            "F15" => Key::F15,
+            "F16" => Key::F16,
+            "F17" => Key::F17,
+            "F18" => Key::F18,
+            "F19" => Key::F19,
+            "F20" => Key::F20,
+            "F21" => Key::F21,
+            "F22" => Key::F22,
+            "F23" => Key::F23,
+            "F24" => Key::F24,
+            "Numpad0" => Key::Numpad0,
+            "Numpad1" => Key::Numpad1,
+            "Numpad2" => Key::Numpad2,
+            "Numpad3" => Key::Numpad3,
+            "Numpad4" => Key::Numpad4,
+            "Numpad5" => Key::Numpad5,
+            "Numpad6" => Key::Numpad6,
+            "Numpad7" => Key::Numpad7,
+            "Numpad8" => Key::Numpad8,
+            "Numpad9" => Key::Numpad9,
+            "NumpadAdd" => Key::Add,
+            "NumpadSubtract" => Key::Subtract,
+            "NumpadMultiply" => Key::Multiply,
+            "NumpadDivide" => Key::Divide,
+            "NumpadDecimal" => Key::Decimal,
+            "AudioVolumeUp" | "VolumeUp" => Key::VolumeUp,
+            "AudioVolumeDown" | "VolumeDown" => Key::VolumeDown,
+            "AudioVolumeMute" | "VolumeMute" => Key::VolumeMute,
+            "MediaPlayPause" => Key::MediaPlayPause,
+            "MediaTrackNext" => Key::MediaNextTrack,
+            "MediaTrackPrevious" => Key::MediaPrevTrack,
+            "MediaStop" => Key::MediaStop,
+            "BrowserBack" => Key::BrowserBack,
+            "BrowserForward" => Key::BrowserForward,
+            "BrowserRefresh" => Key::BrowserRefresh,
+            "BrowserHome" => Key::BrowserHome,
             other => single_char(other).unwrap_or(Key::Other(0)),
         },
     }

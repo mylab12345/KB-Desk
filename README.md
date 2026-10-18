@@ -34,6 +34,53 @@ browser and enter the **ID** and **password** from the banner.
 so the same command works on every OS. A Rust toolchain is required
 (<https://rustup.rs>).
 
+## Control any machine from just a browser (relay mode)
+
+Browsers cannot open raw TCP connections, so a browser can never talk to the
+relay directly. `kbdesk-web` is the bridge that fixes that: it serves the viewer
+page over HTTP, accepts the browser's WebSocket, and speaks the relay's TCP
+protocol on the browser's behalf. Run the relay and the bridge together on one
+reachable server (LAN box, VPS, …) and the person *controlling* needs nothing
+but a browser:
+
+```bash
+# On the server (stays running):
+./run.sh serve            # = kbdesk serve: relay :21118 + browser viewer :8080
+
+# On each machine to be controlled:
+kbdesk-host --server <server-ip>:21118 --password <its-password>
+# → prints:  KB-Desk ID: 544228382      (stays registered, reconnects itself)
+
+# On the controlling side: open http://<server-ip>:8080/ in any browser,
+# enter 544 228 382 + that machine's password → full control.
+```
+
+```
+┌─────────┐  WebSocket  ┌────────────────────────────┐   TCP    ┌────────────┐
+│ Browser │◄────────────►│ kbdesk-web ─► kbdesk-server│◄────────►│kbdesk-host │
+│ (only a │   :8080      │  bridge        relay :21118│ registers│ (controlled│
+│ browser)│              │        `kbdesk serve`      │  by ID   │  machine)  │
+└─────────┘              └────────────────────────────┘          └────────────┘
+```
+
+The browser viewer is a complete controller, not a view-only page:
+
+- mouse (incl. middle/back/forward buttons, scroll), full keyboard with
+  left/right modifiers, numpad, F1–F24, PrintScreen, media/browser keys;
+- touch: tap = click, long-press = right-click, drag = move, two-finger
+  drag = scroll, plus an on-screen extra-keys bar and soft-keyboard typing;
+- **Send keys** menu for combinations browsers swallow (Ctrl+Alt+Del,
+  Ctrl+Shift+Esc, Alt+F4, Win+D, …), and **Paste text** to type a string
+  (e.g. a long password) into the remote machine;
+- live quality/FPS controls, Fit / Actual-size / Stretch scaling, fullscreen
+  (with keyboard lock where the browser supports it), view-only toggle,
+  resolution/FPS/latency stats;
+- auto-reconnect, and released keys/buttons can never get stuck on the
+  controlled machine (focus loss / tab close / network drop all release
+  every held key and button on the host);
+- latency stays flat on slow links: frames and mouse-moves are
+  latest-wins at every hop instead of queueing up.
+
 ## What it does
 
 - **Screen sharing** — the host captures its display and streams it as JPEG.
@@ -115,6 +162,7 @@ wires together.
 ```bash
 target/release/kbdesk up     # relay + host + web viewer on this machine
 target/release/kbdesk web    # host + web viewer, no relay
+target/release/kbdesk serve  # relay + web viewer only (server for browser control)
 target/release/kbdesk host   # share this screen (direct)
 target/release/kbdesk relay  # relay server only
 target/release/kbdesk viewer # native desktop viewer
@@ -293,10 +341,18 @@ deployments to constrain that.
 ## Limitations / roadmap
 
 - Single host per ID; a viewer claims a host and the pairing ends when the
-  session closes.
+  session closes (the host re-registers automatically for the next viewer;
+  dead registrations are reaped by the relay within ~10 s).
 - JPEG-only, full-frame capture (no damage regions or adaptive codecs yet).
-- No file transfer, clipboard sync, or multi-monitor selection in the UI yet.
-- Stale registrations are only cleaned up when a viewer next connects.
+- No file transfer or two-way clipboard sync yet — the browser viewer's
+  **Paste text** types text into the host, which covers the common case.
+- Capture is the primary display (X11: the whole root window); the protocol
+  carries a monitor index, but the backends don't switch monitors yet.
+- In a browser, a few shortcuts are always taken by the browser/OS itself
+  (e.g. Ctrl+W, Ctrl+N); use fullscreen + the **Send keys** menu for those.
+  On Windows, a true secure-attention Ctrl+Alt+Del additionally requires the
+  host to run elevated/as a service — synthetic input cannot reach the
+  secure desktop otherwise (an OS restriction, same for every such tool).
 
 ## License
 

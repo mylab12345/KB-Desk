@@ -5,6 +5,7 @@
 #
 #     .\run.ps1              # relay + host + web viewer  (viewers need only an ID)
 #     .\run.ps1 web          # host + web viewer, no relay
+#     .\run.ps1 serve        # relay + web viewer (server: control hosts from any browser)
 #     .\run.ps1 host         # share this screen (direct)
 #     .\run.ps1 relay        # run the relay server only
 #     .\run.ps1 viewer       # native desktop viewer
