@@ -61,6 +61,11 @@ def hkdf_expand(prk: bytes, info: bytes, length: int) -> bytes:
     return out[:length]
 
 
+def ct_eq(a: bytes, b: bytes) -> bool:
+    """Constant-time equality for confirmation values."""
+    return hmac_mod.compare_digest(a, b)
+
+
 def generate_keypair(secret_bytes: bytes = None):
     """Return (secret_bytes32, public_bytes32)."""
     if secret_bytes is None:

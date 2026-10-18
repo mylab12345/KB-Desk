@@ -48,24 +48,40 @@ jobs:
           -p kbdesk-launcher -p kbdesk-server -p kbdesk-web -p kbdesk-host -p kbdesk-client
           2>&1 | tee -a ci.log
 
-      # End-to-end smoke test of the exact "control from a browser" path:
-      # browser_client.py (WebSocket, like web/index.html) -> kbdesk-web ->
-      # kbdesk-server relay -> fake_host.py (speaks the wire protocol).
-      # Asserts: spaced ID works, auth, JPEG frames, mouse/key/text input,
-      # stream retune, ping/pong latency probe, clean session end.
-      - name: E2E smoke test (browser via relay)
+      # End-to-end smoke test of the exact "control from a browser" path,
+      # now with mandatory encryption on every leg:
+      #   browser_client.py --WSS--> kbdesk-web (blind bridge)
+      #     --TLS--> tap_proxy.py (captures wire bytes) --> relay --TLS-->
+      #     fake_host.py, with the protocol-v2 end-to-end encrypted session
+      #     (X25519 + password key confirmation) between the two Pythons.
+      # Asserts: spaced ID works, unknown ID fails, wrong password is caught
+      # by key confirmation, encrypted JPEG frames + mouse/key/text input,
+      # stream retune, ping/pong, clean session end — and that the tapped
+      # wire carries ONLY TLS ciphertext (no password/text/JPEG/plaintext).
+      - name: E2E smoke test (browser via relay, TLS + E2E encrypted)
         run: |
           set -x
           ./target/release/kbdesk --help | grep -q serve
           test -x ./target/release/kbdesk-server && test -x ./target/release/kbdesk-web
-          pip install --quiet websockets
-          ./target/release/kbdesk-server --bind 127.0.0.1 --port 21118 &
-          ./target/release/kbdesk-web --listen 127.0.0.1:8080 --relay 127.0.0.1:21118 &
+          pip install --quiet websockets cryptography
+          # Throwaway test CA + leaf for 127.0.0.1/localhost.
+          mkdir -p /tmp/kbtls
+          openssl req -x509 -newkey rsa:2048 -keyout /tmp/kbtls/ca-key.pem -out /tmp/kbtls/ca.pem -days 2 -nodes -subj "/CN=KB-Desk test CA" 2>/dev/null
+          openssl req -newkey rsa:2048 -keyout /tmp/kbtls/key.pem -out /tmp/kbtls/leaf.csr -nodes -subj "/CN=localhost" 2>/dev/null
+          printf 'subjectAltName=DNS:localhost,IP:127.0.0.1\n' > /tmp/kbtls/ext.cnf
+          openssl x509 -req -in /tmp/kbtls/leaf.csr -CA /tmp/kbtls/ca.pem -CAkey /tmp/kbtls/ca-key.pem -CAcreateserial -out /tmp/kbtls/cert.pem -days 2 -extfile /tmp/kbtls/ext.cnf 2>/dev/null
+          ./target/release/kbdesk-server --bind 127.0.0.1 --port 21118 --tls-cert /tmp/kbtls/cert.pem --tls-key /tmp/kbtls/key.pem &
+          python3 tests/e2e/tap_proxy.py &
+          ./target/release/kbdesk-web --listen 127.0.0.1:8080 --relay 127.0.0.1:21119 --tls-cert /tmp/kbtls/cert.pem --tls-key /tmp/kbtls/key.pem --tls-ca /tmp/kbtls/ca.pem &
           python3 tests/e2e/fake_host.py &
-          for i in $(seq 1 30); do curl -sf http://127.0.0.1:8080/healthz && break || sleep 1; done
-          curl -sf http://127.0.0.1:8080/config | grep -q '"relay":true'
-          curl -sf http://127.0.0.1:8080/ | grep -q 'KB-Desk'
+          for i in $(seq 1 30); do curl -skf https://127.0.0.1:8080/healthz && break || sleep 1; done
+          curl -skf https://127.0.0.1:8080/config | grep -q '"relay":true'
+          curl -skf https://127.0.0.1:8080/config | grep -q '"e2e":true'
+          curl -skf https://127.0.0.1:8080/ | grep -q 'crypto.js'
+          curl -skf https://127.0.0.1:8080/crypto.js | grep -q 'KBCrypto'
           python3 tests/e2e/browser_client.py
+          python3 tests/e2e/check_tap.py
+          grep -q '"auth", true' /tmp/fake_host_log.jsonl
           grep -q 'MouseMove' /tmp/fake_host_log.jsonl
           grep -q 'hello remote' /tmp/fake_host_log.jsonl
           grep -q 'ReleaseAll' /tmp/fake_host_log.jsonl
@@ -110,6 +126,18 @@ jobs:
           key: ${{ matrix.target }}
       - if: matrix.target == 'x86_64-pc-windows-gnu'
         run: sudo apt-get update && sudo apt-get install -y gcc-mingw-w64-x86-64
+      # ring (rustls' crypto provider) compiles C + asm, so the darwin
+      # cross-check needs a C compiler that can target macOS from Linux:
+      # zig cc provides one without an Apple SDK (check-only; no linking).
+      - if: matrix.target == 'x86_64-apple-darwin'
+        name: C toolchain for ring (zig cc)
+        run: |
+          pip install --quiet ziglang
+          printf '#!/bin/sh\nexec python3 -m ziglang cc -target x86_64-macos-gnu "$@"\n' > /tmp/zigcc-darwin
+          printf '#!/bin/sh\nexec python3 -m ziglang ar "$@"\n' > /tmp/zigar-darwin
+          chmod +x /tmp/zigcc-darwin /tmp/zigar-darwin
+          echo "CC_x86_64_apple_darwin=/tmp/zigcc-darwin" >> "$GITHUB_ENV"
+          echo "AR_x86_64_apple_darwin=/tmp/zigar-darwin" >> "$GITHUB_ENV"
       # egui/eframe cross-compilation needs target GUI SDKs; the README only
       # claims check-level support, and the headless crates are the ones whose
       # cross-platform code (capture/input backends) actually matters here.
