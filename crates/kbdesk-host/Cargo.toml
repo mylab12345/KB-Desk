@@ -1,0 +1,23 @@
+[package]
+name = "kbdesk-host"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "KB-Desk host agent: screen capture + remote input (original implementation)"
+
+[[bin]]
+name = "kbdesk-host"
+path = "src/main.rs"
+
+[dependencies]
+kbdesk-core.workspace = true
+anyhow.workspace = true
+clap.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+image.workspace = true
+enigo = "0.6"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+x11rb = { version = "0.13", features = ["allow-unsafe-code"] }

@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=KB-Desk
+GenericName=Remote Desktop
+Comment=View and control another machine's screen
+Exec=kbdesk-client
+Icon=kbdesk
+Terminal=false
+Categories=Network;RemoteAccess;
+Keywords=remote;desktop;vnc;rdp;control;

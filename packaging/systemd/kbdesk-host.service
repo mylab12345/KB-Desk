@@ -1,0 +1,16 @@
+[Unit]
+Description=KB-Desk host agent (shares this machine's screen)
+Documentation=file:/usr/share/doc/kbdesk/README.md
+After=graphical-session.target
+PartOf=graphical-session.target
+
+[Service]
+Type=simple
+EnvironmentFile=%h/.config/kbdesk/host.env
+# KB_DESK_SERVER is required; KB_DESK_FPS is optional (defaults to 15).
+ExecStart=/usr/bin/kbdesk-host --server ${KB_DESK_SERVER} --fps ${KB_DESK_FPS}
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=graphical-session.target

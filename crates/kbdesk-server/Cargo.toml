@@ -1,0 +1,18 @@
+[package]
+name = "kbdesk-server"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "KB-Desk rendezvous + relay server (original implementation)"
+
+[[bin]]
+name = "kbdesk-server"
+path = "src/main.rs"
+
+[dependencies]
+kbdesk-core.workspace = true
+anyhow.workspace = true
+clap.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true

@@ -1,0 +1,17 @@
+# ─────────────────────────────────────────────────────────────────────────────
+#  KB-Desk
+#  An original, from-scratch remote desktop system.
+#
+#  This project is NOT derived from RustDesk, TigerVNC, AnyDesk, or any other
+#  existing remote desktop product. It contains no third-party source code and
+#  was designed independently around a public, documented wire protocol shape
+#  (length-prefixed frames) that is common to many network protocols.
+#
+#  License: MIT
+# ─────────────────────────────────────────────────────────────────────────────
+/target
+**/*.rs.bk
+*.pdb
+.DS_Store
+/dist
+/packaging/.build

@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- KB-Desk icon (original artwork) -->
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256">
+  <defs>
+    <linearGradient id="g" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#1b2430"/>
+      <stop offset="1" stop-color="#0b0e13"/>
+    </linearGradient>
+  </defs>
+  <rect x="18" y="34" width="220" height="150" rx="16" fill="url(#g)" stroke="#4f9cf9" stroke-width="6"/>
+  <rect x="40" y="58" width="176" height="102" rx="6" fill="#05070a"/>
+  <path d="M52 78 h70 M52 98 h110 M52 118 h90" stroke="#3ecf8e" stroke-width="7" stroke-linecap="round"/>
+  <circle cx="188" cy="146" r="12" fill="#4f9cf9"/>
+  <rect x="92" y="184" width="72" height="12" rx="6" fill="#4f9cf9"/>
+  <rect x="66" y="196" width="124" height="16" rx="8" fill="#28303c"/>
+</svg>

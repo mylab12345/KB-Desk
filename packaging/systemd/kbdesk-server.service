@@ -1,0 +1,21 @@
+[Unit]
+Description=KB-Desk relay / rendezvous server
+Documentation=file:/usr/share/doc/kbdesk/README.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/kbdesk-server --bind 0.0.0.0 --port 21118
+Restart=on-failure
+RestartSec=3
+# Run as an unprivileged account. Create it with:
+#   sudo useradd --system --no-create-home --shell /usr/sbin/nologin kbdesk
+DynamicUser=yes
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+
+[Install]
+WantedBy=multi-user.target

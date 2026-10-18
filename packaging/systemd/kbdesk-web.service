@@ -1,0 +1,21 @@
+[Unit]
+Description=KB-Desk web viewer
+Documentation=file:/usr/share/doc/kbdesk/README.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+EnvironmentFile=-/etc/kbdesk/kbdesk-web.env
+# $KB_DESK_WEB_ARGS is word-split, e.g. "--listen 0.0.0.0:8080 --relay relay.example:21118"
+ExecStart=/usr/bin/kbdesk-web $KB_DESK_WEB_ARGS
+Restart=on-failure
+RestartSec=3
+# DynamicUser=yes
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+
+[Install]
+WantedBy=multi-user.target
