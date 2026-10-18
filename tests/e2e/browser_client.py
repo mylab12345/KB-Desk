@@ -182,6 +182,11 @@ async def main():
     # ---- phase B: wrong password caught by key confirmation ----
     ws, sess = await dial("WRONG-password")
     await sess.pump_until(lambda s: s.error is not None, timeout=10)
+    if sess.error and "no host" in sess.error:  # raced the (re)registration
+        await ws.close()
+        await asyncio.sleep(2)
+        ws, sess = await dial("WRONG-password")
+        await sess.pump_until(lambda s: s.error is not None, timeout=10)
     check(sess.state != "live" and sess.error is not None and "authentication failed" in sess.error,
           f"wrong password detected by viewer-side key confirmation (got: {sess.error})")
     await ws.close()

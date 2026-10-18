@@ -76,6 +76,7 @@ jobs:
           ./target/release/kbdesk-web --listen 127.0.0.1:8080 --relay 127.0.0.1:21119 --tls-cert /tmp/kbtls/cert.pem --tls-key /tmp/kbtls/key.pem --tls-ca /tmp/kbtls/ca.pem &
           python3 tests/e2e/fake_host.py &
           for i in $(seq 1 30); do curl -skf https://127.0.0.1:8080/healthz && break || sleep 1; done
+          for i in $(seq 1 30); do grep -q '"assigned"' /tmp/fake_host_log.jsonl 2>/dev/null && break || sleep 1; done
           curl -skf https://127.0.0.1:8080/config | grep -q '"relay":true'
           curl -skf https://127.0.0.1:8080/config | grep -q '"e2e":true'
           curl -skf https://127.0.0.1:8080/ | grep -q 'crypto.js'
