@@ -136,10 +136,14 @@
     <div id="hint">Enter an ID and password, then press Connect.<br />
       <span style="font-size:12px">Once connected, click the screen to control it — mouse, touch and keyboard
       are sent to the remote machine. Use <b>Fullscreen</b> so keys like Esc / F-keys reach the remote
-      instead of your browser (a few, e.g. Ctrl+W, are always reserved by the browser itself).</span></div>
+      instead of your browser (a few, e.g. Ctrl+W, are always reserved by the browser itself).<br /><br />
+      🔒 Screen and input are end-to-end encrypted between this page and the host
+      (X25519 + ChaCha20-Poly1305, keys bound to your password — it is never sent anywhere).
+      The relay and even this web server only ever forward ciphertext.</span></div>
   </div>
 </div>
 
+<script src="crypto.js"></script>
 <script>
 (() => {
   "use strict";

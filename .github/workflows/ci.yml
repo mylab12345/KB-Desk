@@ -72,17 +72,17 @@ jobs:
           printf 'subjectAltName=DNS:localhost,IP:127.0.0.1\n' > /tmp/kbtls/ext.cnf
           openssl x509 -req -in /tmp/kbtls/leaf.csr -CA /tmp/kbtls/ca.pem -CAkey /tmp/kbtls/ca-key.pem -CAcreateserial -out /tmp/kbtls/cert.pem -days 2 -extfile /tmp/kbtls/ext.cnf 2>/dev/null
           ./target/release/kbdesk-server --bind 127.0.0.1 --port 21118 --tls-cert /tmp/kbtls/cert.pem --tls-key /tmp/kbtls/key.pem &
-          python3 tests/e2e/tap_proxy.py &
+          python3 -u tests/e2e/tap_proxy.py &
           ./target/release/kbdesk-web --listen 127.0.0.1:8080 --relay 127.0.0.1:21119 --tls-cert /tmp/kbtls/cert.pem --tls-key /tmp/kbtls/key.pem --tls-ca /tmp/kbtls/ca.pem &
-          python3 tests/e2e/fake_host.py &
+          python3 -u tests/e2e/fake_host.py &
           for i in $(seq 1 30); do curl -skf https://127.0.0.1:8080/healthz && break || sleep 1; done
           for i in $(seq 1 30); do grep -q '"assigned"' /tmp/fake_host_log.jsonl 2>/dev/null && break || sleep 1; done
           curl -skf https://127.0.0.1:8080/config | grep -q '"relay":true'
           curl -skf https://127.0.0.1:8080/config | grep -q '"e2e":true'
           curl -skf https://127.0.0.1:8080/ | grep -q 'crypto.js'
           curl -skf https://127.0.0.1:8080/crypto.js | grep -q 'KBCrypto'
-          python3 tests/e2e/browser_client.py
-          python3 tests/e2e/check_tap.py
+          python3 -u tests/e2e/browser_client.py
+          python3 -u tests/e2e/check_tap.py
           grep -q '"auth", true' /tmp/fake_host_log.jsonl
           grep -q 'MouseMove' /tmp/fake_host_log.jsonl
           grep -q 'hello remote' /tmp/fake_host_log.jsonl
